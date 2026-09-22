@@ -1,0 +1,19 @@
+{
+  "name": "themis-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
+    "@privy-io/server-auth": "^1.18.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "ethers": "^6.13.5",
+    "express": "^4.21.2",
+    "genlayer-js": "^1.1.8",
+    "undici": "^8.10.2"
+  }
+}

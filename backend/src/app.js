@@ -31,11 +31,42 @@ app.use((req, res, next) => {
   next();
 });
 
+import { initDb } from "./db.js";
+
+let dbReady = false;
+let dbPromise = null;
+async function ensureDb() {
+  if (dbReady) return;
+  if (!dbPromise) {
+    dbPromise = initDb()
+      .then(() => {
+        dbReady = true;
+      })
+      .catch((err) => {
+        console.warn("[Themis DB] Lazy initDb warning:", err.message);
+        dbPromise = null;
+      });
+  }
+  return dbPromise;
+}
+
+app.use(async (req, res, next) => {
+  if (
+    req.path.startsWith("/api") ||
+    req.path === "/health" ||
+    req.path === "/rounds" ||
+    req.path === "/claims"
+  ) {
+    await ensureDb();
+  }
+  next();
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // System & Telemetry Endpoints
 // ─────────────────────────────────────────────────────────────────────────────
 
-app.get("/api/health", async (req, res) => {
+app.get(["/api", "/api/", "/api/health", "/health"], async (req, res) => {
   let dbOk = false;
   try {
     const dbTest = await sql`SELECT NOW() AS now`;
@@ -54,7 +85,7 @@ app.get("/api/health", async (req, res) => {
   });
 });
 
-app.get("/api/config", (req, res) => {
+app.get(["/api/config", "/config"], (req, res) => {
   res.json({
     contractAddress: getContractAddress(),
     chainId: 61999,
@@ -65,7 +96,7 @@ app.get("/api/config", (req, res) => {
   });
 });
 
-app.get("/api/metrics", async (req, res) => {
+app.get(["/api/metrics", "/metrics"], async (req, res) => {
   try {
     const onChain = await readMetricsOnChain();
 
@@ -102,7 +133,7 @@ app.get("/api/metrics", async (req, res) => {
 // User & Auth Endpoints (Email-Only)
 // ─────────────────────────────────────────────────────────────────────────────
 
-app.post("/api/auth/sync", async (req, res) => {
+app.post(["/api/auth/sync", "/auth/sync"], async (req, res) => {
   try {
     const { email, privyDid, walletAddress } = req.body;
     if (!email || !email.includes("@")) {
@@ -128,7 +159,7 @@ app.post("/api/auth/sync", async (req, res) => {
   }
 });
 
-app.get("/api/users/:email", async (req, res) => {
+app.get(["/api/users/:email", "/users/:email"], async (req, res) => {
   try {
     const cleanEmail = req.params.email.trim().toLowerCase();
     const users = await sql`SELECT * FROM users WHERE email = ${cleanEmail} LIMIT 1`;
@@ -154,7 +185,7 @@ app.get("/api/users/:email", async (req, res) => {
 // Grant Rounds Endpoints
 // ─────────────────────────────────────────────────────────────────────────────
 
-app.get("/api/rounds", async (req, res) => {
+app.get(["/api/rounds", "/rounds"], async (req, res) => {
   try {
     // 1. Fetch rounds from DB
     const dbRounds = await sql`SELECT * FROM rounds ORDER BY created_at DESC`;
@@ -203,7 +234,7 @@ app.get("/api/rounds", async (req, res) => {
   }
 });
 
-app.get("/api/rounds/:id", async (req, res) => {
+app.get(["/api/rounds/:id", "/rounds/:id"], async (req, res) => {
   try {
     const roundId = req.params.id;
     const dbRound = await sql`SELECT * FROM rounds WHERE round_id = ${roundId} LIMIT 1`;
@@ -243,7 +274,7 @@ app.get("/api/rounds/:id", async (req, res) => {
   }
 });
 
-app.post("/api/rounds", optionalAuth, async (req, res) => {
+app.post(["/api/rounds", "/rounds"], optionalAuth, async (req, res) => {
   try {
     const {
       roundId,
@@ -315,7 +346,7 @@ app.post("/api/rounds", optionalAuth, async (req, res) => {
 // Grant Claims & Consensus Adjudication Endpoints
 // ─────────────────────────────────────────────────────────────────────────────
 
-app.get("/api/claims", async (req, res) => {
+app.get(["/api/claims", "/claims"], async (req, res) => {
   try {
     const { roundId, verdict, status, limit = 50, offset = 0 } = req.query;
 
@@ -342,7 +373,7 @@ app.get("/api/claims", async (req, res) => {
   }
 });
 
-app.get("/api/claims/:id", async (req, res) => {
+app.get(["/api/claims/:id", "/claims/:id"], async (req, res) => {
   try {
     const claimId = req.params.id;
     const dbClaim = await sql`SELECT * FROM claims WHERE claim_id = ${claimId} LIMIT 1`;
@@ -368,7 +399,7 @@ app.get("/api/claims/:id", async (req, res) => {
  * Submit Grant Claim (Abstracted Transaction)
  * Posts the required bond and runs two-tier consensus adjudication on GenLayer.
  */
-app.post("/api/claims/submit", optionalAuth, async (req, res) => {
+app.post(["/api/claims/submit", "/claims/submit"], optionalAuth, async (req, res) => {
   try {
     const {
       claimId,
@@ -476,7 +507,7 @@ app.post("/api/claims/submit", optionalAuth, async (req, res) => {
  * Execute Settlement (Abstracted Transaction)
  * Transfers grant + bond refund to claimant or slashes bond if fraud detected.
  */
-app.post("/api/claims/:id/settle", optionalAuth, async (req, res) => {
+app.post(["/api/claims/:id/settle", "/claims/:id/settle"], optionalAuth, async (req, res) => {
   try {
     const claimId = req.params.id;
     console.log(`[Claim Settle] Executing settlement for ${claimId}`);
@@ -511,7 +542,7 @@ app.post("/api/claims/:id/settle", optionalAuth, async (req, res) => {
 /**
  * Register Appeal (Abstracted Transaction)
  */
-app.post("/api/claims/:id/appeal", optionalAuth, async (req, res) => {
+app.post(["/api/claims/:id/appeal", "/claims/:id/appeal"], optionalAuth, async (req, res) => {
   try {
     const claimId = req.params.id;
     const { reason } = req.body;

@@ -6,9 +6,16 @@ Every grant program in crypto eventually runs into the same quiet heartbreak: a 
 
 ---
 
-## Live Deployment on GenLayer Studio
+## Live Deployment on Vercel & GenLayer Studio
 
-Themis is deployed and live on the GenLayer Studio Network:
+### Live Production Web Application
+Themis is deployed and live on Vercel:
+- **Primary Production URL**: [https://themis-escrow.vercel.app](https://themis-escrow.vercel.app)
+- **Protocol Alias**: [https://themis-genlayer.vercel.app](https://themis-genlayer.vercel.app)
+- **Grant Alias**: [https://themis-grant.vercel.app](https://themis-grant.vercel.app)
+
+### On-Chain Contract on GenLayer
+Themis Intelligent Contract is live on the GenLayer Studio Network:
 
 - **Intelligent Contract Address**: `0x016A4143cACEc8Ce4Ac0DD241260D5426C0eeE39`
 - **Deployer / Relayer Address**: `0xBC1399c55538eC034d4Da550C03c34Ae0C357f53`
