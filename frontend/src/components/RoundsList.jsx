@@ -14,6 +14,17 @@ export function RoundsList({ onOpenCreateRound, onOpenSubmit }) {
     }
   };
 
+  const formatRemainingDuration = (expiresAt) => {
+    if (!expiresAt) return "Perpetual duration";
+    const diffMs = new Date(expiresAt).getTime() - Date.now();
+    if (diffMs <= 0) return "Timeline elapsed";
+    const days = Math.floor(diffMs / 86400000);
+    const hours = Math.floor((diffMs % 86400000) / 3600000);
+    if (days > 0) return `${days}d ${hours}h remaining`;
+    const mins = Math.floor((diffMs % 3600000) / 60000);
+    return `${hours}h ${mins}m remaining`;
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -59,6 +70,14 @@ export function RoundsList({ onOpenCreateRound, onOpenSubmit }) {
         <div className="space-y-3">
           {rounds.map((round) => {
             const isSelected = selectedRound?.round_id === round.round_id;
+            const isExhausted =
+              round.status === "EXHAUSTED" ||
+              BigInt(round.remaining_pool_wei || "0") < BigInt(round.grant_amount_wei || "0");
+            const isExpired =
+              round.status === "EXPIRED" ||
+              (round.expires_at && new Date(round.expires_at).getTime() <= Date.now());
+            const isOpen = round.status === "OPEN" && !isExhausted && !isExpired;
+
             return (
               <div
                 key={round.round_id}
@@ -81,9 +100,20 @@ export function RoundsList({ onOpenCreateRound, onOpenSubmit }) {
                       {round.round_id}
                     </p>
                   </div>
-                  <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded-full bg-[#d4f717]/15 text-[#d4f717] border border-[#d4f717]/30">
-                    {round.status}
-                  </span>
+
+                  {isExhausted ? (
+                    <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                      POOL EXHAUSTED
+                    </span>
+                  ) : isExpired ? (
+                    <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                      TIMELINE ELAPSED
+                    </span>
+                  ) : (
+                    <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded-full bg-[#d4f717]/15 text-[#d4f717] border border-[#d4f717]/30">
+                      OPEN
+                    </span>
+                  )}
                 </div>
 
                 <p className="text-xs text-[#a3a3cf] line-clamp-2 mb-3">
@@ -107,28 +137,37 @@ export function RoundsList({ onOpenCreateRound, onOpenSubmit }) {
 
                   <div className="p-1.5 rounded bg-[#181836]/60">
                     <p className="text-[10px] text-[#a3a3cf]">Required Bond</p>
-                    <p className="text-xs font-mono font-semibold text-[#5a38fd] dark:text-[#a3a3cf]">
+                    <p className="text-xs font-mono font-semibold text-[#a3a3cf]">
                       {formatGen(round.bond_amount_wei)} GEN
                     </p>
                   </div>
                 </div>
 
                 {isSelected && (
-                  <div className="mt-3 pt-2 flex items-center justify-between">
+                  <div className="mt-3 pt-2 flex items-center justify-between gap-2">
                     <span className="text-[11px] text-[#a3a3cf] flex items-center gap-1 font-mono">
                       <Clock className="w-3 h-3 text-[#d4f717]" />
-                      {round.finality_window_seconds}s finality window
+                      <span>{formatRemainingDuration(round.expires_at)}</span>
                     </span>
 
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onOpenSubmit();
-                      }}
-                      className="px-3 py-1 rounded-lg bg-[#d4f717] hover:bg-[#bfe010] text-[#24244f] text-xs font-bold action-btn"
-                    >
-                      Submit to this Round
-                    </button>
+                    {isOpen ? (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenSubmit();
+                        }}
+                        className="px-3 py-1 rounded-lg bg-[#d4f717] hover:bg-[#bfe010] text-[#24244f] text-xs font-bold action-btn"
+                      >
+                        Submit to this Round
+                      </button>
+                    ) : (
+                      <button
+                        disabled
+                        className="px-3 py-1 rounded-lg bg-[#181836] border border-[#3b3b6d] text-[#a3a3cf] text-xs font-semibold cursor-not-allowed opacity-75"
+                      >
+                        {isExhausted ? "Pool Exhausted" : "Applications Closed"}
+                      </button>
+                    )}
                   </div>
                 )}
               </div>

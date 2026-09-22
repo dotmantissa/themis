@@ -492,3 +492,166 @@ def test_failure_duplicate_claim_id_reverts():
             pr_url="https://github.com/org/repo/pull/2",
             activity_url="https://github.com/claimant",
         )
+
+
+def test_round_creation_with_duration():
+    contract = create_test_contract()
+    mock_gl.message = MockSender(address="0xdao", value=5000000000000000000)
+    mock_gl.message_raw = {"datetime": "2026-09-22T10:00:00Z"}
+
+    res = contract.create_round(
+        round_id="round-duration-test",
+        title="Timed Grant Round",
+        description="Testing duration and expiry",
+        grant_amount_wei=1000000000000000000,
+        required_bond_wei=100000000000000000,
+        finality_window_seconds=1800,
+        duration_seconds=86400,  # 1 day
+    )
+    parsed = json.loads(res)
+    assert parsed["duration_seconds"] == 86400
+    assert parsed["expires_at"] > 0
+    assert parsed["status"] == "OPEN"
+
+    round_data = json.loads(contract.get_round("round-duration-test"))
+    assert round_data["duration_seconds"] == 86400
+    assert round_data["expires_at"] == round_data["created_at"] + 86400
+    assert round_data["status"] == "OPEN"
+
+
+def test_claim_rejection_after_duration_expires():
+    contract = create_test_contract()
+    mock_gl.message = MockSender(address="0xdao", value=5000000000000000000)
+    # Start round at 10:00:00Z with 3600 seconds duration (expires at 11:00:00Z)
+    mock_gl.message_raw = {"datetime": "2026-09-22T10:00:00Z"}
+    contract.create_round(
+        round_id="expiring-round",
+        title="1-Hour Grant Round",
+        description="Duration limited",
+        grant_amount_wei=1000000000000000000,
+        required_bond_wei=100000000000000000,
+        duration_seconds=3600,
+    )
+
+    # 1. Submission before expiry succeeds
+    mock_gl.message = MockSender(address="0xclaimant", value=100000000000000000)
+    mock_gl.message_raw = {"datetime": "2026-09-22T10:30:00Z"}
+    mock_pr_response = MagicMock()
+    mock_pr_response.body = json.dumps({"title": "Fix bug", "merged": True}).encode("utf-8")
+    mock_gl.nondet.web.get = MagicMock(return_value=mock_pr_response)
+    mock_gl.nondet.web.render = MagicMock(return_value="<html><body>Activity</body></html>")
+    mock_gl.nondet.exec_prompt = MagicMock(return_value={"sybil_score": 5, "fraud_detected": False, "sybil_tier": "ORGANIC", "reasoning": "Legit"})
+
+    res = contract.submit_grant_claim(
+        claim_id="timely-claim",
+        round_id="expiring-round",
+        pr_url="https://github.com/org/repo/pull/1",
+        activity_url="https://github.com/claimant",
+    )
+    assert json.loads(res)["status"] == "ADJUDICATED"
+
+    # 2. Advance time past expiry (11:00:01Z) -> Submission must revert
+    mock_gl.message_raw = {"datetime": "2026-09-22T11:00:01Z"}
+    with pytest.raises(ValueError, match="Grant round timeline has elapsed; applications are closed"):
+        contract.submit_grant_claim(
+            claim_id="late-claim",
+            round_id="expiring-round",
+            pr_url="https://github.com/org/repo/pull/2",
+            activity_url="https://github.com/lateuser",
+        )
+
+    # Round status reflected as EXPIRED
+    round_data = json.loads(contract.get_round("expiring-round"))
+    assert round_data["status"] == "EXPIRED"
+
+
+def test_claim_rejection_when_pool_exhausted():
+    contract = create_test_contract()
+    # Fund round with exactly 1 GEN (covers exactly 1 grant payout)
+    mock_gl.message = MockSender(address="0xdao", value=1000000000000000000)
+    mock_gl.message_raw = {"datetime": "2026-09-22T10:00:00Z"}
+    contract.create_round(
+        round_id="one-grant-pool",
+        title="Single Grant Pool",
+        description="Covers one grant only",
+        grant_amount_wei=1000000000000000000,  # 1 GEN
+        required_bond_wei=100000000000000000,   # 0.1 GEN
+        finality_window_seconds=60,
+        duration_seconds=604800,
+    )
+
+    # Claimant 1 submits and gets approved
+    mock_gl.message = MockSender(address="0xclaimant1", value=100000000000000000)
+    mock_pr_response = MagicMock()
+    mock_pr_response.body = json.dumps({"title": "PR 1", "merged": True}).encode("utf-8")
+    mock_gl.nondet.web.get = MagicMock(return_value=mock_pr_response)
+    mock_gl.nondet.web.render = MagicMock(return_value="<html>activity</html>")
+    mock_gl.nondet.exec_prompt = MagicMock(return_value={"sybil_score": 10, "fraud_detected": False, "sybil_tier": "ORGANIC", "reasoning": "Organic"})
+
+    contract.submit_grant_claim(
+        claim_id="claim-1",
+        round_id="one-grant-pool",
+        pr_url="https://github.com/org/repo/pull/1",
+        activity_url="https://github.com/claimant1",
+    )
+
+    # Settle claim 1 after finality window
+    mock_gl.message_raw = {"datetime": "2026-09-22T10:05:00Z"}
+    settle_res = contract.settle_claim("claim-1")
+    assert json.loads(settle_res)["status"] == "SETTLED"
+
+    # Pool is now exhausted (remaining_pool = 0)
+    round_data = json.loads(contract.get_round("one-grant-pool"))
+    assert round_data["remaining_pool_wei"] == "0"
+    assert round_data["status"] == "EXHAUSTED"
+
+    # Claimant 2 tries to submit -> must revert
+    mock_gl.message = MockSender(address="0xclaimant2", value=100000000000000000)
+    with pytest.raises(ValueError, match="Grant round pool is exhausted; no further applications accepted"):
+        contract.submit_grant_claim(
+            claim_id="claim-2",
+            round_id="one-grant-pool",
+            pr_url="https://github.com/org/repo/pull/2",
+            activity_url="https://github.com/claimant2",
+        )
+
+
+def test_deposit_funds_reopens_exhausted_round():
+    contract = create_test_contract()
+    mock_gl.message = MockSender(address="0xdao", value=1000000000000000000)
+    mock_gl.message_raw = {"datetime": "2026-09-22T10:00:00Z"}
+    contract.create_round(
+        round_id="reopen-round",
+        title="Reopenable Round",
+        description="Can be refueled",
+        grant_amount_wei=1000000000000000000,
+        required_bond_wei=100000000000000000,
+        finality_window_seconds=60,
+        duration_seconds=86400,
+    )
+
+    # Exhaust it with 1 claim and settlement
+    mock_gl.message = MockSender(address="0xclaimant", value=100000000000000000)
+    mock_pr = MagicMock()
+    mock_pr.body = json.dumps({"title": "PR", "merged": True}).encode("utf-8")
+    mock_gl.nondet.web.get = MagicMock(return_value=mock_pr)
+    mock_gl.nondet.web.render = MagicMock(return_value="<html>activity</html>")
+    mock_gl.nondet.exec_prompt = MagicMock(return_value={"sybil_score": 10, "fraud_detected": False, "sybil_tier": "ORGANIC", "reasoning": "Organic"})
+
+    contract.submit_grant_claim(
+        claim_id="first-claim",
+        round_id="reopen-round",
+        pr_url="https://github.com/org/repo/pull/1",
+        activity_url="https://github.com/claimant",
+    )
+    mock_gl.message_raw = {"datetime": "2026-09-22T10:05:00Z"}
+    contract.settle_claim("first-claim")
+
+    assert json.loads(contract.get_round("reopen-round"))["status"] == "EXHAUSTED"
+
+    # DAO deposits another 2 GEN while within duration
+    mock_gl.message = MockSender(address="0xdao", value=2000000000000000000)
+    dep_res = contract.deposit_round_funds("reopen-round")
+    assert json.loads(dep_res)["status"] == "OPEN"
+    assert json.loads(contract.get_round("reopen-round"))["status"] == "OPEN"
+

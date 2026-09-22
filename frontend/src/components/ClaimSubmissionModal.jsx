@@ -26,10 +26,26 @@ export function ClaimSubmissionModal({ isOpen, onClose }) {
   if (!isOpen) return null;
 
   const currentRound = rounds.find((r) => r.round_id === roundId) || selectedRound || rounds[0];
+  const isExhausted =
+    currentRound?.status === "EXHAUSTED" ||
+    BigInt(currentRound?.remaining_pool_wei || "0") < BigInt(currentRound?.grant_amount_wei || "0");
+  const isExpired =
+    currentRound?.status === "EXPIRED" ||
+    (currentRound?.expires_at && new Date(currentRound.expires_at).getTime() <= Date.now());
+  const isClosed = isExhausted || isExpired;
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError(null);
+
+    if (isClosed) {
+      setError(
+        isExhausted
+          ? "This grant round pool is exhausted. No further claims can be submitted."
+          : "This grant round timeline has elapsed. Applications are closed."
+      );
+      return;
+    }
 
     if (!prUrl.trim() || !activityUrl.trim()) {
       setError("Please provide both your pull request link and your activity graph source.");
@@ -100,6 +116,17 @@ export function ClaimSubmissionModal({ isOpen, onClose }) {
               ))}
             </select>
           </div>
+
+          {isClosed && (
+            <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>
+                {isExhausted
+                  ? "This grant round pool is exhausted. No further claims can be submitted."
+                  : "This grant round timeline has elapsed. Applications are closed."}
+              </span>
+            </div>
+          )}
 
           {/* Claim Identifier */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -223,15 +250,23 @@ export function ClaimSubmissionModal({ isOpen, onClose }) {
 
             <button
               type="submit"
-              disabled={submitting}
+              disabled={submitting || isClosed}
               className={`px-5 py-2.5 rounded-xl font-bold text-xs shadow-lg action-btn flex items-center gap-2 ${
-                submitting
+                submitting || isClosed
                   ? "bg-slate-700 text-slate-400 cursor-not-allowed"
                   : "bg-gradient-to-r from-[#d4f717] to-[#bfe010] text-[#24244f] hover:shadow-[#d4f717]/20"
               }`}
             >
               <CheckCircle2 className="w-4 h-4" />
-              <span>{submitting ? "Adjudicating On-Chain..." : "Submit Claim with Bond"}</span>
+              <span>
+                {isClosed
+                  ? isExhausted
+                    ? "Round Pool Exhausted"
+                    : "Timeline Elapsed"
+                  : submitting
+                  ? "Adjudicating On-Chain..."
+                  : "Submit Claim with Bond"}
+              </span>
             </button>
           </div>
         </form>

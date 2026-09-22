@@ -13,6 +13,8 @@ import {
   createRoundAbstracted,
   settleClaimAbstracted,
   appealClaimAbstracted,
+  dripNativeGen,
+  getWalletBalance,
 } from "./genlayer.js";
 import { optionalAuth, requireAuth } from "./privy.js";
 
@@ -141,21 +143,101 @@ app.post(["/api/auth/sync", "/auth/sync"], async (req, res) => {
     }
 
     const cleanEmail = email.trim().toLowerCase();
+    const existing = await sql`SELECT * FROM users WHERE email = ${cleanEmail} LIMIT 1`;
+    let drippedInfo = null;
+
+    const targetWallet = walletAddress || existing[0]?.wallet_address;
+    if (targetWallet && targetWallet.startsWith("0x")) {
+      const alreadyDripped = Boolean(existing[0]?.dripped_at);
+      if (!alreadyDripped) {
+        try {
+          console.log(`[Onboarding Faucet] Dripping 10 GEN to new account ${cleanEmail} (${targetWallet})`);
+          drippedInfo = await dripNativeGen(targetWallet, "10");
+        } catch (dripErr) {
+          console.error("[Onboarding Faucet Error]:", dripErr.message);
+        }
+      }
+    }
+
     const result = await sql`
-      INSERT INTO users (email, privy_did, wallet_address, last_login)
-      VALUES (${cleanEmail}, ${privyDid || null}, ${walletAddress || null}, NOW())
+      INSERT INTO users (
+        email, privy_did, wallet_address,
+        dripped_at, dripped_tx_hash, dripped_amount_wei,
+        last_login
+      )
+      VALUES (
+        ${cleanEmail},
+        ${privyDid || null},
+        ${targetWallet || null},
+        ${drippedInfo ? sql`NOW()` : (existing[0]?.dripped_at || null)},
+        ${drippedInfo?.txHash || existing[0]?.dripped_tx_hash || null},
+        ${drippedInfo?.amountWei || existing[0]?.dripped_amount_wei || null},
+        NOW()
+      )
       ON CONFLICT (email)
       DO UPDATE SET
         privy_did = COALESCE(EXCLUDED.privy_did, users.privy_did),
         wallet_address = COALESCE(EXCLUDED.wallet_address, users.wallet_address),
+        dripped_at = COALESCE(users.dripped_at, EXCLUDED.dripped_at),
+        dripped_tx_hash = COALESCE(users.dripped_tx_hash, EXCLUDED.dripped_tx_hash),
+        dripped_amount_wei = COALESCE(users.dripped_amount_wei, EXCLUDED.dripped_amount_wei),
         last_login = NOW()
       RETURNING *;
     `;
 
-    res.json({ success: true, user: result[0] });
+    // Fetch live balance
+    let balance = { balanceWei: "0", balanceGen: "0" };
+    if (targetWallet) {
+      balance = await getWalletBalance(targetWallet);
+    }
+
+    res.json({
+      success: true,
+      user: result[0],
+      dripped: drippedInfo,
+      balance,
+    });
   } catch (err) {
     console.error("[Auth Sync Error]:", err);
     res.status(500).json({ error: "Failed to sync user" });
+  }
+});
+
+app.post(["/api/faucet/drip", "/faucet/drip"], async (req, res) => {
+  try {
+    const { walletAddress, email } = req.body;
+    if (!walletAddress || !walletAddress.startsWith("0x")) {
+      return res.status(400).json({ error: "Valid wallet address required" });
+    }
+
+    const dripResult = await dripNativeGen(walletAddress, "10");
+    if (email) {
+      await sql`
+        UPDATE users
+        SET
+          dripped_at = NOW(),
+          dripped_tx_hash = ${dripResult.txHash},
+          dripped_amount_wei = ${dripResult.amountWei},
+          wallet_address = ${walletAddress}
+        WHERE email = ${email.trim().toLowerCase()}
+      `;
+    }
+
+    const balance = await getWalletBalance(walletAddress);
+    res.json({ success: true, drip: dripResult, balance });
+  } catch (err) {
+    console.error("[Faucet Drip Error]:", err);
+    res.status(500).json({ error: err.message || "Failed to drip GEN" });
+  }
+});
+
+app.get(["/api/faucet/balance/:address", "/faucet/balance/:address"], async (req, res) => {
+  try {
+    const { address } = req.params;
+    const balance = await getWalletBalance(address);
+    res.json(balance);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to get balance" });
   }
 });
 
@@ -201,11 +283,12 @@ app.get(["/api/rounds", "/rounds"], async (req, res) => {
       if (!existingIds.has(rid)) {
         const onChainData = await readRoundOnChain(rid);
         if (onChainData) {
+          const expiresAtVal = onChainData.expires_at ? new Date(Number(onChainData.expires_at) * 1000) : null;
           await sql`
             INSERT INTO rounds (
               round_id, creator, title, description,
               pool_wei, remaining_pool_wei, grant_amount_wei, bond_amount_wei,
-              finality_window_seconds, status, created_at
+              finality_window_seconds, duration_seconds, expires_at, status, created_at
             ) VALUES (
               ${rid},
               ${onChainData.creator || "0x0"},
@@ -216,6 +299,8 @@ app.get(["/api/rounds", "/rounds"], async (req, res) => {
               ${onChainData.grant_amount_per_claim_wei || "0"},
               ${onChainData.required_bond_wei || "0"},
               ${Number(onChainData.finality_window_seconds || 3600)},
+              ${Number(onChainData.duration_seconds || 604800)},
+              ${expiresAtVal},
               ${onChainData.status || "OPEN"},
               to_timestamp(${Number(onChainData.created_at || Math.floor(Date.now() / 1000))})
             )
@@ -225,9 +310,24 @@ app.get(["/api/rounds", "/rounds"], async (req, res) => {
       }
     }
 
-    // Return fresh refreshed rounds
+    // Return fresh refreshed rounds with dynamic status evaluation
     const refreshedRounds = await sql`SELECT * FROM rounds ORDER BY created_at DESC`;
-    res.json(refreshedRounds);
+    const nowMs = Date.now();
+    const evaluatedRounds = refreshedRounds.map((r) => {
+      let status = r.status || "OPEN";
+      const remaining = BigInt(r.remaining_pool_wei || "0");
+      const grantAmt = BigInt(r.grant_amount_wei || "0");
+      const expiresAtMs = r.expires_at ? new Date(r.expires_at).getTime() : null;
+
+      if (remaining < grantAmt) {
+        status = "EXHAUSTED";
+      } else if (expiresAtMs && nowMs >= expiresAtMs) {
+        status = "EXPIRED";
+      }
+      return { ...r, status };
+    });
+
+    res.json(evaluatedRounds);
   } catch (err) {
     console.error("[Get Rounds Error]:", err);
     res.status(500).json({ error: "Failed to fetch grant rounds" });
@@ -253,6 +353,8 @@ app.get(["/api/rounds/:id", "/rounds/:id"], async (req, res) => {
           grant_amount_wei: onChain.grant_amount_per_claim_wei,
           bond_amount_wei: onChain.required_bond_wei,
           finality_window_seconds: onChain.finality_window_seconds,
+          duration_seconds: onChain.duration_seconds,
+          expires_at: onChain.expires_at ? new Date(Number(onChain.expires_at) * 1000).toISOString() : null,
           status: onChain.status,
         };
       }
@@ -260,6 +362,17 @@ app.get(["/api/rounds/:id", "/rounds/:id"], async (req, res) => {
 
     if (!round) {
       return res.status(404).json({ error: "Round not found" });
+    }
+
+    // Dynamic status evaluation
+    const nowMs = Date.now();
+    const remaining = BigInt(round.remaining_pool_wei || "0");
+    const grantAmt = BigInt(round.grant_amount_wei || "0");
+    const expiresAtMs = round.expires_at ? new Date(round.expires_at).getTime() : null;
+    if (remaining < grantAmt) {
+      round.status = "EXHAUSTED";
+    } else if (expiresAtMs && nowMs >= expiresAtMs) {
+      round.status = "EXPIRED";
     }
 
     // Fetch claims for this round
@@ -284,11 +397,15 @@ app.post(["/api/rounds", "/rounds"], optionalAuth, async (req, res) => {
       bondAmountWei,
       poolDepositWei,
       finalitySeconds = 3600,
+      durationSeconds = 604800,
     } = req.body;
 
     if (!roundId || !title || !grantAmountWei || !bondAmountWei || !poolDepositWei) {
       return res.status(400).json({ error: "Missing required round parameters" });
     }
+
+    const durationSec = Number(durationSeconds) || 604800;
+    const expiresAt = new Date(Date.now() + durationSec * 1000);
 
     // Submit abstracted transaction on GenLayer
     const { txHash, round } = await createRoundAbstracted({
@@ -299,6 +416,7 @@ app.post(["/api/rounds", "/rounds"], optionalAuth, async (req, res) => {
       bondAmountWei,
       poolDepositWei,
       finalitySeconds,
+      durationSeconds: durationSec,
     });
 
     // Record in Neon DB
@@ -306,10 +424,10 @@ app.post(["/api/rounds", "/rounds"], optionalAuth, async (req, res) => {
       INSERT INTO rounds (
         round_id, creator, title, description,
         pool_wei, remaining_pool_wei, grant_amount_wei, bond_amount_wei,
-        finality_window_seconds, status, tx_hash
+        finality_window_seconds, duration_seconds, expires_at, status, tx_hash
       ) VALUES (
         ${roundId},
-        ${round.creator || getDeployerAddress()},
+        ${round?.creator || getDeployerAddress()},
         ${title},
         ${description || ""},
         ${String(poolDepositWei)},
@@ -317,12 +435,16 @@ app.post(["/api/rounds", "/rounds"], optionalAuth, async (req, res) => {
         ${String(grantAmountWei)},
         ${String(bondAmountWei)},
         ${Number(finalitySeconds)},
+        ${durationSec},
+        ${expiresAt},
         'OPEN',
         ${txHash}
       )
       ON CONFLICT (round_id) DO UPDATE SET
         remaining_pool_wei = EXCLUDED.remaining_pool_wei,
         pool_wei = EXCLUDED.pool_wei,
+        duration_seconds = EXCLUDED.duration_seconds,
+        expires_at = EXCLUDED.expires_at,
         tx_hash = EXCLUDED.tx_hash;
     `;
 
@@ -331,7 +453,7 @@ app.post(["/api/rounds", "/rounds"], optionalAuth, async (req, res) => {
       VALUES (
         'ROUND_CREATED',
         ${req.user?.email || "anonymous"},
-        ${JSON.stringify({ roundId, txHash, poolDepositWei })}
+        ${JSON.stringify({ roundId, txHash, poolDepositWei, durationSeconds: durationSec })}
       );
     `;
 
@@ -419,6 +541,22 @@ app.post(["/api/claims/submit", "/claims/submit"], optionalAuth, async (req, res
 
     console.log(`[Claim Submit] Processing claim ${claimId} by ${email}`);
 
+    // Pre-flight check: verify round status, expiry, and pool exhaustion before submitting
+    const roundCheck = await sql`SELECT * FROM rounds WHERE round_id = ${roundId} LIMIT 1`;
+    if (roundCheck.length) {
+      const r = roundCheck[0];
+      const remaining = BigInt(r.remaining_pool_wei || "0");
+      const grantAmt = BigInt(r.grant_amount_wei || "0");
+      const expiresAtMs = r.expires_at ? new Date(r.expires_at).getTime() : null;
+
+      if (remaining < grantAmt) {
+        return res.status(400).json({ error: "Grant round pool is exhausted; no further applications accepted" });
+      }
+      if (expiresAtMs && Date.now() >= expiresAtMs) {
+        return res.status(400).json({ error: "Grant round timeline has elapsed; applications are closed" });
+      }
+    }
+
     // Call on-chain abstracted relayer
     const { txHash, claim } = await submitClaimAbstracted({
       claimId,
@@ -471,6 +609,7 @@ app.post(["/api/claims/submit", "/claims/submit"], optionalAuth, async (req, res
         verdict = EXCLUDED.verdict,
         verdict_reasoning = EXCLUDED.verdict_reasoning,
         status = EXCLUDED.status,
+        finality_expires_at = EXCLUDED.finality_expires_at,
         tx_hash = EXCLUDED.tx_hash
       RETURNING *;
     `;
@@ -479,14 +618,12 @@ app.post(["/api/claims/submit", "/claims/submit"], optionalAuth, async (req, res
     await sql`
       INSERT INTO audit_logs (action, actor, details)
       VALUES (
-        'CLAIM_ADJUDICATED',
+        'CLAIM_SUBMITTED',
         ${email},
         ${JSON.stringify({
           claimId,
           roundId,
           verdict: claim.verdict,
-          tier1_pr_merged: claim.tier1_pr_merged,
-          tier2_sybil_score: claim.tier2_sybil_score,
           txHash,
         })}
       );
@@ -522,6 +659,20 @@ app.post(["/api/claims/:id/settle", "/claims/:id/settle"], optionalAuth, async (
         settled_at = NOW()
       WHERE claim_id = ${claimId};
     `;
+
+    // Sync round pool and status if available
+    if (claim.round_id) {
+      const onChainRound = await readRoundOnChain(claim.round_id);
+      if (onChainRound) {
+        await sql`
+          UPDATE rounds
+          SET
+            remaining_pool_wei = ${onChainRound.remaining_pool_wei || "0"},
+            status = ${onChainRound.status || "OPEN"}
+          WHERE round_id = ${claim.round_id};
+        `;
+      }
+    }
 
     await sql`
       INSERT INTO audit_logs (action, actor, details)

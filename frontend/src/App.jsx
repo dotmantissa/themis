@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { Navbar } from "./components/Navbar";
+import { RealtimeTreasuryMetrics } from "./components/RealtimeTreasuryMetrics";
 import { BalanceScaleHero } from "./components/BalanceScaleHero";
 import { RoundsList } from "./components/RoundsList";
 import { ClaimsDocketList } from "./components/ClaimsDocketList";
@@ -8,7 +9,7 @@ import { ClaimSubmissionModal } from "./components/ClaimSubmissionModal";
 import { CreateRoundModal } from "./components/CreateRoundModal";
 import { AppealModal } from "./components/AppealModal";
 import { useThemis } from "./context/ThemisContext";
-import { CheckCircle2, AlertCircle, X, ShieldAlert, Cpu } from "lucide-react";
+import { CheckCircle2, AlertCircle, X, Cpu } from "lucide-react";
 
 export function App() {
   const { feedbackMessage, setFeedbackMessage, selectedClaim } = useThemis();
@@ -19,11 +20,8 @@ export function App() {
 
   return (
     <div className="min-h-screen bg-[#24244f] text-white flex flex-col selection:bg-[#d4f717] selection:text-[#24244f]">
-      {/* Top Navigation */}
-      <Navbar
-        onOpenSubmit={() => setIsSubmitOpen(true)}
-        onOpenCreateRound={() => setIsCreateRoundOpen(true)}
-      />
+      {/* Top Navigation: Simplified */}
+      <Navbar />
 
       {/* Global Action Feedback Notification */}
       {feedbackMessage && (
@@ -62,6 +60,9 @@ export function App() {
 
       {/* Main Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+        {/* First Block Under Navbar: Realtime Big Metrics from Studio Network */}
+        <RealtimeTreasuryMetrics />
+
         {/* Structural Device: Dual Chamber Balance Scale */}
         <BalanceScaleHero
           onOpenSubmit={() => setIsSubmitOpen(true)}
@@ -86,7 +87,7 @@ export function App() {
         </div>
       </main>
 
-      {/* Footer */}
+      {/* Clean Simplified Footer without Banned Text */}
       <footer className="border-t border-[#3b3b6d]/60 bg-[#181836]/90 py-6 mt-12">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-[#a3a3cf]">
           <div className="flex items-center gap-2">
@@ -96,20 +97,9 @@ export function App() {
             </span>
           </div>
 
-          <div className="flex items-center gap-4 font-mono text-[11px]">
-            <a
-              href="https://genlayer-explorer.vercel.app"
-              target="_blank"
-              rel="noreferrer"
-              className="text-[#d4f717] hover:underline"
-            >
-              GenLayer Explorer
-            </a>
-            <span>•</span>
-            <span>Optimistic AI Consensus</span>
-            <span>•</span>
-            <span>Ghost Escrow Custody</span>
-          </div>
+          <span className="text-[11px] font-mono text-[#a3a3cf]">
+            Autonomous AI Arbitration & Escrow
+          </span>
         </div>
       </footer>
 

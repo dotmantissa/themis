@@ -169,7 +169,19 @@ class ThemisGrantEscrow(gl.Contract):
         clean_id = str(round_id).strip()
         if clean_id not in self.rounds:
             return ""
-        return self.rounds[clean_id]
+        round_data = json.loads(self.rounds[clean_id])
+        rem_pool = int(round_data.get("remaining_pool_wei", 0))
+        grant_amt = int(round_data.get("grant_amount_per_claim_wei", 0))
+        expires_at = int(round_data.get("expires_at", 0))
+        now_ts = int(self._now())
+
+        if round_data.get("status") == "OPEN":
+            if rem_pool < grant_amt:
+                round_data["status"] = "EXHAUSTED"
+            elif expires_at > 0 and now_ts >= expires_at:
+                round_data["status"] = "EXPIRED"
+
+        return json.dumps(round_data, sort_keys=True)
 
     @gl.public.view
     def get_claim(self, claim_id: str) -> str:
@@ -277,9 +289,11 @@ class ThemisGrantEscrow(gl.Contract):
         grant_amount_wei: int,
         required_bond_wei: int,
         finality_window_seconds: int = 0,
+        duration_seconds: int = 604800,
     ) -> str:
         """
         Create a new grant allocation round funded with real GEN deposit.
+        The creator specifies the application duration window during which claims can be submitted.
         """
         clean_round_id = str(round_id).strip()
         clean_title = str(title).strip()
@@ -290,6 +304,7 @@ class ThemisGrantEscrow(gl.Contract):
         self._require(len(clean_title) >= 3, "title must be at least 3 characters")
         self._require(int(grant_amount_wei) > 0, "grant_amount_wei must be positive")
         self._require(int(required_bond_wei) > 0, "required_bond_wei must be positive")
+        self._require(int(duration_seconds) > 0, "duration_seconds must be positive")
 
         deposited_pool = int(gl.message.value)
         self._require(deposited_pool >= int(grant_amount_wei), "Initial deposit must cover at least one grant payout")
@@ -298,7 +313,9 @@ class ThemisGrantEscrow(gl.Contract):
         if finality_window <= 0:
             finality_window = int(self.default_finality_seconds)
 
+        duration_sec = int(duration_seconds)
         now_ts = self._now()
+        expires_at = int(now_ts) + duration_sec
         sender = gl.message.sender_address
 
         round_data = {
@@ -311,6 +328,8 @@ class ThemisGrantEscrow(gl.Contract):
             "grant_amount_per_claim_wei": str(grant_amount_wei),
             "required_bond_wei": str(required_bond_wei),
             "finality_window_seconds": finality_window,
+            "duration_seconds": duration_sec,
+            "expires_at": expires_at,
             "status": "OPEN",
             "total_claims": 0,
             "approved_claims": 0,
@@ -332,6 +351,8 @@ class ThemisGrantEscrow(gl.Contract):
             "grant_amount_wei": str(grant_amount_wei),
             "required_bond_wei": str(required_bond_wei),
             "finality_window_seconds": finality_window,
+            "duration_seconds": duration_sec,
+            "expires_at": expires_at,
         })
 
     @gl.public.write.payable
@@ -347,9 +368,19 @@ class ThemisGrantEscrow(gl.Contract):
         round_data = json.loads(self.rounds[clean_id])
         current_pool = int(round_data.get("pool_wei", 0))
         current_rem = int(round_data.get("remaining_pool_wei", 0))
+        new_rem = current_rem + additional_funds
+        grant_amt = int(round_data.get("grant_amount_per_claim_wei", 0))
+        expires_at = int(round_data.get("expires_at", 0))
+        now_ts = int(self._now())
 
         round_data["pool_wei"] = str(current_pool + additional_funds)
-        round_data["remaining_pool_wei"] = str(current_rem + additional_funds)
+        round_data["remaining_pool_wei"] = str(new_rem)
+
+        # If previously exhausted and new funds cover at least one grant, re-open if still in duration
+        if round_data.get("status") == "EXHAUSTED" and new_rem >= grant_amt:
+            if expires_at == 0 or now_ts < expires_at:
+                round_data["status"] = "OPEN"
+
         self.rounds[clean_id] = json.dumps(round_data, sort_keys=True)
 
         self.total_pool_deposited_wei = u256(int(self.total_pool_deposited_wei) + additional_funds)
@@ -359,6 +390,7 @@ class ThemisGrantEscrow(gl.Contract):
             "added_wei": str(additional_funds),
             "new_pool_wei": round_data["pool_wei"],
             "new_remaining_pool_wei": round_data["remaining_pool_wei"],
+            "status": round_data.get("status", "OPEN"),
         })
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -402,13 +434,26 @@ class ThemisGrantEscrow(gl.Contract):
         self._require(clean_activity_url.startswith("http"), "activity_url must be a valid HTTP/HTTPS URL")
 
         round_data = json.loads(self.rounds[clean_round_id])
-        self._require(round_data.get("status") == "OPEN", "Grant round is not open")
+        now_ts = self._now()
+        expires_at = int(round_data.get("expires_at", 0))
+        remaining_pool = int(round_data.get("remaining_pool_wei", 0))
+        grant_amount = int(round_data.get("grant_amount_per_claim_wei", 0))
+
+        # Check duration expiry: grant ends when timeline elapses
+        if expires_at > 0 and int(now_ts) >= expires_at:
+            round_data["status"] = "EXPIRED"
+            self.rounds[clean_round_id] = json.dumps(round_data, sort_keys=True)
+            self._require(False, "Grant round timeline has elapsed; applications are closed")
+
+        # Check pool exhaustion: grant ends when pool is depleted below grant payout
+        if remaining_pool < grant_amount:
+            round_data["status"] = "EXHAUSTED"
+            self.rounds[clean_round_id] = json.dumps(round_data, sort_keys=True)
+            self._require(False, "Grant round pool is exhausted; no further applications accepted")
+
+        self._require(round_data.get("status") == "OPEN", f"Grant round is {round_data.get('status', 'not open')}")
 
         required_bond = int(round_data.get("required_bond_wei", 0))
-        grant_amount = int(round_data.get("grant_amount_per_claim_wei", 0))
-        remaining_pool = int(round_data.get("remaining_pool_wei", 0))
-
-        self._require(remaining_pool >= grant_amount, "Insufficient pool balance remaining in round")
         posted_bond = int(gl.message.value)
         self._require(posted_bond >= required_bond, f"Posted bond {posted_bond} wei is below required {required_bond} wei")
 
@@ -739,10 +784,15 @@ Respond strictly in valid JSON:
         if verdict == "APPROVED":
             self._require(remaining_pool >= grant_wei, "Insufficient remaining pool funds for approved payout")
             claimant_transfer_wei = grant_wei + bond_wei
-            round_data["remaining_pool_wei"] = str(remaining_pool - grant_wei)
+            new_remaining_pool = remaining_pool - grant_wei
+            round_data["remaining_pool_wei"] = str(new_remaining_pool)
             self.total_grants_disbursed_wei = u256(int(self.total_grants_disbursed_wei) + grant_wei)
             self.total_bonds_refunded_wei = u256(int(self.total_bonds_refunded_wei) + bond_wei)
             claim["status"] = "SETTLED"
+
+            grant_amt_per_claim = int(round_data.get("grant_amount_per_claim_wei", 0))
+            if new_remaining_pool < grant_amt_per_claim:
+                round_data["status"] = "EXHAUSTED"
 
         elif verdict == "REJECTED_SYBIL_FRAUD":
             # Bond slashed into protocol dispute bounty pool

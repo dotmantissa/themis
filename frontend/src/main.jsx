@@ -14,6 +14,9 @@ ReactDOM.createRoot(document.getElementById("root")).render(
       appId={PRIVY_APP_ID}
       config={{
         loginMethods: ["email"],
+        embeddedWallets: {
+          createOnLogin: "users-without-wallets",
+        },
         appearance: {
           theme: "dark",
           accentColor: "#d4f717",

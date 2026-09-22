@@ -1,132 +1,79 @@
 import React from "react";
 import { usePrivy } from "@privy-io/react-auth";
-import { useTheme } from "../context/ThemeContext";
 import { useThemis } from "../context/ThemisContext";
-import {
-  ShieldCheck,
-  Sun,
-  Moon,
-  LogIn,
-  LogOut,
-  Mail,
-  Coins,
-  Scale,
-  RefreshCw,
-} from "lucide-react";
+import { LogIn, LogOut, Mail, Wallet, Coins } from "lucide-react";
 
 export function Navbar() {
-  const { darkMode, toggleTheme } = useTheme();
   const { user, authenticated, login, logout } = usePrivy();
-  const { metrics, refreshData, loading } = useThemis();
+  const { walletBalance, userWalletAddress } = useThemis();
 
-  const formatGen = (weiStr) => {
+  const formatAddress = (addr) => {
+    if (!addr) return "";
+    return `${addr.substring(0, 6)}...${addr.substring(addr.length - 4)}`;
+  };
+
+  const formatBalance = (bal) => {
     try {
-      const val = parseFloat(BigInt(weiStr || "0").toString()) / 1e18;
-      return val.toLocaleString(undefined, { maximumFractionDigits: 3 });
+      const num = parseFloat(bal || "0");
+      return num.toLocaleString(undefined, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 3,
+      });
     } catch {
-      return "0";
+      return "0.00";
     }
   };
 
   return (
-    <header className="border-b border-[#3b3b6d]/40 bg-[#24244f]/90 dark:bg-[#181836]/95 backdrop-blur-md sticky top-0 z-40">
+    <header className="border-b border-[#3b3b6d]/40 bg-[#24244f]/95 backdrop-blur-md sticky top-0 z-40">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between h-18">
-          {/* Logo & Product Title */}
+        <div className="flex items-center justify-between h-16">
+          {/* Simplified Logo and Brand */}
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#d4f717] to-[#5a38fd] p-0.5 shadow-md flex items-center justify-center">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-[#d4f717] to-[#5a38fd] p-0.5 shadow-md flex items-center justify-center">
               <div className="w-full h-full bg-[#24244f] rounded-[10px] flex items-center justify-center">
                 <img
                   src="/themis-logo.svg"
                   alt="Themis Scale"
-                  className="w-7 h-7 object-contain"
+                  className="w-6 h-6 object-contain"
                 />
               </div>
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-display font-bold text-xl tracking-tight text-white">
-                  Themis
-                </span>
-                <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-[#5a38fd]/25 text-[#d4f717] border border-[#5a38fd]/50">
-                  GenLayer studionet
-                </span>
-              </div>
-              <p className="text-xs text-[#a3a3cf]">
-                Sybil Resistant Grant Escrow
-              </p>
-            </div>
+            <span className="font-display font-extrabold text-2xl tracking-tight text-white">
+              Themis
+            </span>
           </div>
 
-          {/* Treasury Telemetry Pills */}
-          <div className="hidden lg:flex items-center gap-4">
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#2d2d5e]/70 border border-[#3b3b6d]/50">
-              <Coins className="w-4 h-4 text-[#d4f717]" />
-              <div className="text-left">
-                <p className="text-[10px] text-[#a3a3cf]">Total Pool Governed</p>
-                <p className="text-xs font-mono font-semibold text-white">
-                  {formatGen(metrics.total_pool_deposited_wei)} GEN
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#2d2d5e]/70 border border-[#3b3b6d]/50">
-              <ShieldCheck className="w-4 h-4 text-[#5a38fd]" />
-              <div className="text-left">
-                <p className="text-[10px] text-[#a3a3cf]">Grants Disbursed</p>
-                <p className="text-xs font-mono font-semibold text-white">
-                  {formatGen(metrics.total_grants_disbursed_wei)} GEN
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#2d2d5e]/70 border border-[#3b3b6d]/50">
-              <Scale className="w-4 h-4 text-[#d4f717]" />
-              <div className="text-left">
-                <p className="text-[10px] text-[#a3a3cf]">Dispute Bounty Pool</p>
-                <p className="text-xs font-mono font-semibold text-[#d4f717]">
-                  {formatGen(metrics.dispute_bounty_pool_wei)} GEN
-                </p>
-              </div>
-            </div>
-          </div>
-
-          {/* Right Action Controls: Refresh, Theme, Email Auth */}
-          <div className="flex items-center gap-2.5">
-            <button
-              onClick={refreshData}
-              disabled={loading}
-              title="Refresh on-chain state"
-              className="p-2 rounded-lg text-[#a3a3cf] hover:text-white hover:bg-[#3b3b6d]/40 action-btn"
-            >
-              <RefreshCw
-                className={`w-4 h-4 ${loading ? "animate-spin text-[#d4f717]" : ""}`}
-              />
-            </button>
-
-            <button
-              onClick={toggleTheme}
-              title="Toggle color theme"
-              className="p-2 rounded-lg text-[#a3a3cf] hover:text-white hover:bg-[#3b3b6d]/40 action-btn"
-            >
-              {darkMode ? (
-                <Sun className="w-4 h-4 text-[#d4f717]" />
-              ) : (
-                <Moon className="w-4 h-4 text-[#5a38fd]" />
-              )}
-            </button>
-
+          {/* Right Action Controls: Email Auth and Embedded Wallet Balance */}
+          <div className="flex items-center gap-3">
             {authenticated ? (
-              <div className="flex items-center gap-2 pl-2 border-l border-[#3b3b6d]/50">
-                <div className="hidden sm:flex items-center gap-2 px-2.5 py-1 rounded-lg bg-[#5a38fd]/20 border border-[#5a38fd]/40">
+              <div className="flex items-center gap-2.5">
+                {/* Embedded Wallet & Balance Chip */}
+                {userWalletAddress && (
+                  <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#181836] border border-[#3b3b6d]/60 text-xs font-mono">
+                    <div className="flex items-center gap-1 text-[#d4f717]">
+                      <Coins className="w-3.5 h-3.5" />
+                      <span className="font-bold">{formatBalance(walletBalance)} GEN</span>
+                    </div>
+                    <span className="text-[#3b3b6d]">|</span>
+                    <span className="text-[#a3a3cf] hidden md:inline" title={userWalletAddress}>
+                      {formatAddress(userWalletAddress)}
+                    </span>
+                  </div>
+                )}
+
+                {/* Email Chip */}
+                <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-[#5a38fd]/15 border border-[#5a38fd]/30 text-xs text-white">
                   <Mail className="w-3.5 h-3.5 text-[#d4f717]" />
-                  <span className="text-xs font-mono text-white max-w-[140px] truncate">
+                  <span className="max-w-[150px] truncate">
                     {user?.email?.address || "Authenticated"}
                   </span>
                 </div>
+
+                {/* Sign Out Button */}
                 <button
                   onClick={logout}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#3b3b6d]/40 hover:bg-[#3b3b6d]/70 text-xs font-medium text-[#a3a3cf] hover:text-white action-btn"
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#2d2d5e] hover:bg-[#3b3b6d] text-xs font-semibold text-[#a3a3cf] hover:text-white action-btn border border-[#3b3b6d]/50"
                 >
                   <LogOut className="w-3.5 h-3.5" />
                   <span className="hidden sm:inline">Sign Out</span>
@@ -135,7 +82,7 @@ export function Navbar() {
             ) : (
               <button
                 onClick={login}
-                className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-[#5a38fd] to-[#714dff] hover:from-[#4d2ee6] hover:to-[#5a38fd] text-white text-xs font-semibold shadow-md action-btn"
+                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-[#5a38fd] to-[#714dff] hover:from-[#4d2ee6] hover:to-[#5a38fd] text-white text-xs font-bold shadow-md action-btn"
               >
                 <LogIn className="w-3.5 h-3.5 text-[#d4f717]" />
                 <span>Email Sign In</span>

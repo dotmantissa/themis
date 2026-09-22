@@ -244,6 +244,7 @@ export async function createRoundAbstracted({
   bondAmountWei,
   poolDepositWei,
   finalitySeconds = 3600,
+  durationSeconds = 604800,
 }) {
   console.log(`[Themis Relayer] Submitting abstracted round creation ${roundId}...`);
 
@@ -257,6 +258,7 @@ export async function createRoundAbstracted({
       BigInt(grantAmountWei),
       BigInt(bondAmountWei),
       Number(finalitySeconds),
+      Number(durationSeconds),
     ],
     value: BigInt(poolDepositWei),
   });
@@ -329,3 +331,59 @@ export async function appealClaimAbstracted(claimId, reason) {
     claim: appealedClaim,
   };
 }
+
+/**
+ * Drip native GEN from deployer wallet to a user's embedded wallet
+ */
+export async function dripNativeGen(recipientAddress, amountGen = "10") {
+  if (!recipientAddress || !ethers.isAddress(recipientAddress)) {
+    throw new Error(`Invalid recipient address: ${recipientAddress}`);
+  }
+
+  console.log(`[Themis Faucet] Dripping ${amountGen} GEN to embedded wallet ${recipientAddress}...`);
+
+  const nonceHex = await rpcCall("eth_getTransactionCount", [
+    DEPLOYER_ADDRESS,
+    "latest",
+  ]);
+  const chainIdHex = await rpcCall("eth_chainId", []);
+  const chainId = parseInt(chainIdHex, 16);
+
+  const rawTx = await wallet.signTransaction({
+    to: recipientAddress,
+    value: ethers.parseEther(String(amountGen)),
+    gasLimit: "0x4C4B40",
+    gasPrice: "0x0",
+    nonce: parseInt(nonceHex, 16),
+    chainId,
+  });
+
+  const txHash = await rpcCall("eth_sendRawTransaction", [rawTx]);
+  console.log(`[Themis Faucet] Drip broadcast with hash: ${txHash}`);
+
+  return {
+    txHash,
+    recipient: recipientAddress,
+    amountGen,
+    amountWei: ethers.parseEther(String(amountGen)).toString(),
+  };
+}
+
+/**
+ * Get native GEN balance for any address
+ */
+export async function getWalletBalance(address) {
+  if (!address || !ethers.isAddress(address)) {
+    return { address, balanceWei: "0", balanceGen: "0" };
+  }
+  try {
+    const raw = await rpcCall("eth_getBalance", [address, "latest"]);
+    const balanceWei = BigInt(raw || "0").toString();
+    const balanceGen = ethers.formatEther(balanceWei);
+    return { address, balanceWei, balanceGen };
+  } catch (err) {
+    console.warn(`[Themis Balance] Failed to fetch balance for ${address}:`, err.message);
+    return { address, balanceWei: "0", balanceGen: "0" };
+  }
+}
+

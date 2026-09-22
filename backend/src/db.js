@@ -31,10 +31,18 @@ export async function initDb() {
       email VARCHAR(255) UNIQUE NOT NULL,
       privy_did VARCHAR(255),
       wallet_address VARCHAR(255),
+      dripped_at TIMESTAMP WITH TIME ZONE,
+      dripped_tx_hash VARCHAR(100),
+      dripped_amount_wei VARCHAR(100),
       created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
       last_login TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
   `;
+
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS dripped_at TIMESTAMP WITH TIME ZONE;`;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS dripped_tx_hash VARCHAR(100);`;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS dripped_amount_wei VARCHAR(100);`;
+
 
   // Grant rounds table
   await sql`
@@ -49,11 +57,16 @@ export async function initDb() {
       grant_amount_wei VARCHAR(100) NOT NULL,
       bond_amount_wei VARCHAR(100) NOT NULL,
       finality_window_seconds INTEGER NOT NULL DEFAULT 3600,
+      duration_seconds INTEGER NOT NULL DEFAULT 604800,
+      expires_at TIMESTAMP WITH TIME ZONE,
       status VARCHAR(50) NOT NULL DEFAULT 'OPEN',
       tx_hash VARCHAR(100),
       created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
   `;
+
+  await sql`ALTER TABLE rounds ADD COLUMN IF NOT EXISTS duration_seconds INTEGER DEFAULT 604800;`;
+  await sql`ALTER TABLE rounds ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP WITH TIME ZONE;`;
 
   // Claims table (mirrors on-chain two-tier verdicts and evidence)
   await sql`

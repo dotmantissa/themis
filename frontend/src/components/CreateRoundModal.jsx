@@ -21,6 +21,7 @@ export function CreateRoundModal({ isOpen, onClose }) {
   const [bondAmountGen, setBondAmountGen] = useState("0.01");
   const [poolDepositGen, setPoolDepositGen] = useState("0.5");
   const [finalityHours, setFinalityHours] = useState("1");
+  const [durationDays, setDurationDays] = useState("7");
   const [error, setError] = useState(null);
 
   if (!isOpen) return null;
@@ -36,6 +37,7 @@ export function CreateRoundModal({ isOpen, onClose }) {
 
     try {
       const finalitySeconds = Math.max(60, Math.round(parseFloat(finalityHours || "1") * 3600));
+      const durationSeconds = Math.max(60, Math.round(parseFloat(durationDays || "7") * 86400));
       await createRound({
         roundId: roundId.trim(),
         title: title.trim(),
@@ -44,6 +46,7 @@ export function CreateRoundModal({ isOpen, onClose }) {
         bondAmountGen: bondAmountGen.trim(),
         poolDepositGen: poolDepositGen.trim(),
         finalitySeconds,
+        durationSeconds,
       });
       onClose();
     } catch (err) {
@@ -141,8 +144,8 @@ export function CreateRoundModal({ isOpen, onClose }) {
             />
           </div>
 
-          {/* Financial Parameters */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {/* Financial and Duration Parameters */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div>
               <label className="block text-xs font-mono text-[#a3a3cf] mb-1.5">
                 Grant Per Claim (GEN)
@@ -187,16 +190,31 @@ export function CreateRoundModal({ isOpen, onClose }) {
                 className="w-full px-3 py-2 rounded-xl bg-[#181836] border border-[#3b3b6d] text-white font-mono text-xs focus:outline-none focus:border-[#d4f717]"
               />
             </div>
+
+            <div>
+              <label className="block text-xs font-mono text-[#a3a3cf] mb-1.5">
+                Grant Duration (Days)
+              </label>
+              <input
+                type="number"
+                step="1"
+                min="0.01"
+                value={durationDays}
+                onChange={(e) => setDurationDays(e.target.value)}
+                required
+                className="w-full px-3 py-2 rounded-xl bg-[#181836] border border-[#3b3b6d] text-white font-mono text-xs focus:outline-none focus:border-[#d4f717]"
+              />
+            </div>
           </div>
 
           {/* Mechanics Callout */}
           <div className="p-3 rounded-xl bg-[#24244f]/80 border border-[#3b3b6d]/60 space-y-1 text-xs">
             <div className="flex items-center gap-1.5 text-[#d4f717] font-semibold">
               <ShieldCheck className="w-3.5 h-3.5" />
-              <span>Native Ghost Custody Protection</span>
+              <span>Grant Lifecycle and Fund Custody</span>
             </div>
             <p className="text-[#a3a3cf] leading-relaxed text-[11px]">
-              Deposited round funds are held natively in the EVM ghost custody contract. Payouts are made through <code className="text-[#d4f717]">emit_transfer</code> upon settlement, safeguarding community capital against malicious drains.
+              Applicants can only submit claims during the active grant duration. A grant round ends when its timeline elapses or when its funding pool is exhausted from verified disbursements. Round deposits remain securely held in EVM ghost custody.
             </p>
           </div>
 

@@ -24,18 +24,49 @@ export function ThemisProvider({ children }) {
   const [submitting, setSubmitting] = useState(false);
   const [feedbackMessage, setFeedbackMessage] = useState(null);
 
-  // Sync authenticated Privy email to backend
+  const [walletBalance, setWalletBalance] = useState("0.0");
+  const [userWalletAddress, setUserWalletAddress] = useState(null);
+
+  // Extract embedded wallet address
+  useEffect(() => {
+    const embedded =
+      user?.wallet?.address ||
+      user?.linkedAccounts?.find((a) => a.type === "wallet")?.address ||
+      null;
+    setUserWalletAddress(embedded);
+  }, [user]);
+
+  // Sync authenticated Privy email to backend and auto-drip 10 GEN
   useEffect(() => {
     if (authenticated && user?.email?.address) {
+      const embedded =
+        user?.wallet?.address ||
+        user?.linkedAccounts?.find((a) => a.type === "wallet")?.address ||
+        null;
+
       fetch("/api/auth/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email: user.email.address,
           privyDid: user.id,
-          walletAddress: user.wallet?.address || null,
+          walletAddress: embedded,
         }),
-      }).catch((err) => console.warn("Failed to sync user session:", err));
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.dripped) {
+            setFeedbackMessage({
+              type: "success",
+              title: "10 GEN Testnet Drip Received",
+              message: `Your embedded wallet (${embedded?.substring(0, 6)}...${embedded?.substring(38)}) has been funded with 10 GEN on Studio network.`,
+            });
+          }
+          if (data.balance?.balanceGen) {
+            setWalletBalance(data.balance.balanceGen);
+          }
+        })
+        .catch((err) => console.warn("Failed to sync user session:", err));
     }
   }, [authenticated, user]);
 
@@ -76,9 +107,66 @@ export function ThemisProvider({ children }) {
     }
   }, [selectedRound, selectedClaim]);
 
+  // Initial load
   useEffect(() => {
     refreshData();
   }, []);
+
+  // Real-time polling: Keep metrics always in sync with what is on-chain in studio network
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch("/api/metrics");
+        if (res.ok) {
+          const m = await res.json();
+          setMetrics(m.onChain || m);
+        }
+
+        // Also refresh user balance in real-time if logged in
+        if (userWalletAddress) {
+          const balRes = await fetch(`/api/faucet/balance/${userWalletAddress}`);
+          if (balRes.ok) {
+            const balData = await balRes.json();
+            if (balData.balanceGen) {
+              setWalletBalance(balData.balanceGen);
+            }
+          }
+        }
+      } catch {
+        // Silently ignore background polling errors
+      }
+    }, 4000);
+
+    return () => clearInterval(interval);
+  }, [userWalletAddress]);
+
+  // Request explicit 10 GEN drip from faucet
+  const requestDrip = async () => {
+    if (!userWalletAddress) return;
+    try {
+      const res = await fetch("/api/faucet/drip", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          walletAddress: userWalletAddress,
+          email: user?.email?.address || null,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setFeedbackMessage({
+          type: "success",
+          title: "10 GEN Testnet Drip Received",
+          message: "10 GEN successfully transferred to your embedded wallet.",
+        });
+        if (data.balance?.balanceGen) {
+          setWalletBalance(data.balance.balanceGen);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to request faucet drip:", err);
+    }
+  };
 
   // Submit grant claim (Abstracted transaction via backend relayer)
   const submitClaim = async ({ claimId, roundId, prUrl, activityUrl, screenshotUrl, notes }) => {
@@ -239,7 +327,16 @@ export function ThemisProvider({ children }) {
   };
 
   // Create new grant round
-  const createRound = async ({ roundId, title, description, grantAmountGen, bondAmountGen, poolDepositGen, finalitySeconds }) => {
+  const createRound = async ({
+    roundId,
+    title,
+    description,
+    grantAmountGen,
+    bondAmountGen,
+    poolDepositGen,
+    finalitySeconds,
+    durationSeconds,
+  }) => {
     setSubmitting(true);
     setFeedbackMessage(null);
     try {
@@ -261,6 +358,7 @@ export function ThemisProvider({ children }) {
           bondAmountWei: bondWei,
           poolDepositWei: poolWei,
           finalitySeconds: finalitySeconds || 3600,
+          durationSeconds: durationSeconds || 604800,
         }),
       });
 
@@ -315,6 +413,9 @@ export function ThemisProvider({ children }) {
         authenticated,
         login,
         logout,
+        walletBalance,
+        userWalletAddress,
+        requestDrip,
       }}
     >
       {children}
