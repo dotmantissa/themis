@@ -550,3 +550,21 @@ app.post("/api/claims/:id/appeal", optionalAuth, async (req, res) => {
     res.status(500).json({ error: err.message || "Failed to submit appeal" });
   }
 });
+
+// Serve frontend dist static files in production
+import path from "path";
+import fs from "fs";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const distPath = path.resolve(__dirname, "../../frontend/dist");
+
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+  app.get("*", (req, res, next) => {
+    if (req.path.startsWith("/api/")) return next();
+    res.sendFile(path.join(distPath, "index.html"));
+  });
+}
+

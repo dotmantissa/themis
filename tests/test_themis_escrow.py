@@ -95,8 +95,8 @@ def create_test_contract(owner="0xbc1399c55538ec034d4da550c03c34ae0c357f53"):
 def test_initial_protocol_metrics():
     contract = create_test_contract()
     assert contract.get_owner() == "0xbc1399c55538ec034d4da550c03c34ae0c357f53"
-    assert contract.get_all_round_ids() == []
-    assert contract.get_all_claim_ids() == []
+    assert json.loads(contract.get_all_round_ids()) == []
+    assert json.loads(contract.get_all_claim_ids()) == []
 
     metrics = json.loads(contract.get_escrow_metrics())
     assert metrics["total_rounds"] == 0
@@ -124,7 +124,7 @@ def test_round_creation_and_funding():
     assert parsed["status"] == "OPEN"
     assert parsed["deposited_pool_wei"] == "5000000000000000000"
 
-    assert contract.get_all_round_ids() == ["themis-q4-builders"]
+    assert json.loads(contract.get_all_round_ids()) == ["themis-q4-builders"]
     round_data = json.loads(contract.get_round("themis-q4-builders"))
     assert round_data["title"] == "Themis Developer Grant Round 1"
     assert round_data["remaining_pool_wei"] == "5000000000000000000"

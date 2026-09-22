@@ -157,12 +157,12 @@ class ThemisGrantEscrow(gl.Contract):
         }, sort_keys=True)
 
     @gl.public.view
-    def get_all_round_ids(self) -> DynArray[str]:
-        return self.round_ids
+    def get_all_round_ids(self) -> str:
+        return json.dumps(list(self.round_ids))
 
     @gl.public.view
-    def get_all_claim_ids(self) -> DynArray[str]:
-        return self.claim_ids
+    def get_all_claim_ids(self) -> str:
+        return json.dumps(list(self.claim_ids))
 
     @gl.public.view
     def get_round(self, round_id: str) -> str:
