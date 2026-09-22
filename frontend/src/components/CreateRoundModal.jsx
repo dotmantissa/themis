@@ -18,13 +18,34 @@ export function CreateRoundModal({ isOpen, onClose }) {
   const [title, setTitle] = useState("Open Protocol Infrastructure Grant");
   const [description, setDescription] = useState("Empowering independent developers building decentralized tooling, client libraries, and consensus infrastructure.");
   const [grantAmountGen, setGrantAmountGen] = useState("0.1");
+  const [rewardRecipientsCount, setRewardRecipientsCount] = useState("3");
   const [bondAmountGen, setBondAmountGen] = useState("0.01");
-  const [poolDepositGen, setPoolDepositGen] = useState("0.5");
+  const [poolDepositGen, setPoolDepositGen] = useState("0.3");
   const [finalityHours, setFinalityHours] = useState("1");
   const [durationDays, setDurationDays] = useState("7");
   const [error, setError] = useState(null);
 
   if (!isOpen) return null;
+
+  const handleRecipientsChange = (val) => {
+    setRewardRecipientsCount(val);
+    const count = parseInt(val, 10) || 1;
+    const perReward = parseFloat(grantAmountGen) || 0;
+    const needed = (count * perReward).toFixed(2);
+    if (parseFloat(poolDepositGen) < parseFloat(needed)) {
+      setPoolDepositGen(needed);
+    }
+  };
+
+  const handleGrantAmountChange = (val) => {
+    setGrantAmountGen(val);
+    const count = parseInt(rewardRecipientsCount, 10) || 1;
+    const perReward = parseFloat(val) || 0;
+    const needed = (count * perReward).toFixed(2);
+    if (parseFloat(poolDepositGen) < parseFloat(needed)) {
+      setPoolDepositGen(needed);
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -32,6 +53,15 @@ export function CreateRoundModal({ isOpen, onClose }) {
 
     if (!roundId.trim() || !title.trim()) {
       setError("Please specify both a round identifier and title.");
+      return;
+    }
+
+    const count = Math.max(1, parseInt(rewardRecipientsCount || "1", 10));
+    const perReward = parseFloat(grantAmountGen || "0");
+    const minPoolNeeded = count * perReward;
+
+    if (parseFloat(poolDepositGen || "0") < minPoolNeeded) {
+      setError(`Pool deposit must be at least ${minPoolNeeded.toFixed(3)} GEN to cover ${count} winner reward(s).`);
       return;
     }
 
@@ -47,6 +77,7 @@ export function CreateRoundModal({ isOpen, onClose }) {
         poolDepositGen: poolDepositGen.trim(),
         finalitySeconds,
         durationSeconds,
+        rewardRecipientsCount: count,
       });
       onClose();
     } catch (err) {
@@ -145,19 +176,35 @@ export function CreateRoundModal({ isOpen, onClose }) {
           </div>
 
           {/* Financial and Duration Parameters */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
             <div>
               <label className="block text-xs font-mono text-[#a3a3cf] mb-1.5">
-                Grant Per Claim (GEN)
+                Reward Per Winner (GEN)
               </label>
               <input
                 type="number"
                 step="0.01"
                 min="0.01"
                 value={grantAmountGen}
-                onChange={(e) => setGrantAmountGen(e.target.value)}
+                onChange={(e) => handleGrantAmountChange(e.target.value)}
                 required
                 className="w-full px-3 py-2 rounded-xl bg-[#181836] border border-[#3b3b6d] text-white font-mono text-xs focus:outline-none focus:border-[#d4f717]"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-mono text-[#a3a3cf] mb-1.5">
+                Winning Projects
+              </label>
+              <input
+                type="number"
+                step="1"
+                min="1"
+                max="50"
+                value={rewardRecipientsCount}
+                onChange={(e) => handleRecipientsChange(e.target.value)}
+                required
+                className="w-full px-3 py-2 rounded-xl bg-[#181836] border border-[#3b3b6d] text-[#d4f717] font-mono text-xs focus:outline-none focus:border-[#d4f717]"
               />
             </div>
 
@@ -193,7 +240,7 @@ export function CreateRoundModal({ isOpen, onClose }) {
 
             <div>
               <label className="block text-xs font-mono text-[#a3a3cf] mb-1.5">
-                Grant Duration (Days)
+                Duration (Days)
               </label>
               <input
                 type="number"
@@ -211,10 +258,10 @@ export function CreateRoundModal({ isOpen, onClose }) {
           <div className="p-3 rounded-xl bg-[#24244f]/80 border border-[#3b3b6d]/60 space-y-1 text-xs">
             <div className="flex items-center gap-1.5 text-[#d4f717] font-semibold">
               <ShieldCheck className="w-3.5 h-3.5" />
-              <span>Grant Lifecycle and Fund Custody</span>
+              <span>Top Strengths Ranking and Pool Sharing</span>
             </div>
             <p className="text-[#a3a3cf] leading-relaxed text-[11px]">
-              Applicants can only submit claims during the active grant duration. A grant round ends when its timeline elapses or when its funding pool is exhausted from verified disbursements. Round deposits remain securely held in EVM ghost custody.
+              Applications remain open until the grant round deadline elapses. GenLayer validators evaluate merged pull request proofs, sybil defense, and idea strength (0 to 100). When the deadline elapses, the top {rewardRecipientsCount} ranking projects share the pool. Honest runners-up receive full bond refunds; fraudulent sybil accounts are slashed into the dispute bounty pool.
             </p>
           </div>
 

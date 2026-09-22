@@ -36,7 +36,15 @@ export function ClaimsDocketList({ onSelectClaim }) {
       return (
         <span className="inline-flex items-center gap-1 text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-[#d4f717]/20 text-[#d4f717] border border-[#d4f717]/40">
           <ShieldCheck className="w-3 h-3" />
-          APPROVED
+          WINNER
+        </span>
+      );
+    }
+    if (verdict === "HONEST_RUNNER_UP") {
+      return (
+        <span className="inline-flex items-center gap-1 text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-500/30">
+          <ShieldCheck className="w-3 h-3" />
+          RUNNER UP
         </span>
       );
     }
@@ -51,7 +59,7 @@ export function ClaimsDocketList({ onSelectClaim }) {
     return (
       <span className="inline-flex items-center gap-1 text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-slate-500/20 text-slate-300 border border-slate-500/30">
         <AlertTriangle className="w-3 h-3" />
-        UNMERGED
+        ADJUDICATED
       </span>
     );
   };
@@ -130,11 +138,17 @@ export function ClaimsDocketList({ onSelectClaim }) {
                       </span>
                       {getVerdictBadge(claim.verdict, claim.is_appealed)}
                     </div>
-                    <p className="text-[11px] text-[#a3a3cf] truncate mt-0.5">
-                      Round: {claim.round_id} &bull; Sybil Risk:{" "}
-                      <span className="font-mono text-[#d4f717]">
-                        {claim.tier2_sybil_score ?? 0}/100
-                      </span>
+                    <p className="text-[11px] text-[#a3a3cf] truncate mt-0.5 flex items-center gap-1.5 flex-wrap">
+                      <span>Round: {claim.round_id}</span>
+                      <span>&bull;</span>
+                      <span>Idea Strength: <strong className="font-mono text-[#d4f717]">{claim.strength_score ?? 0}/100</strong></span>
+                      <span>&bull;</span>
+                      <span>Sybil Risk: <span className="font-mono text-white">{claim.tier2_sybil_score ?? 0}/100</span></span>
+                      {Number(claim.rank) > 0 && (
+                        <span className="px-1.5 py-0.5 rounded bg-[#5a38fd]/40 text-[#d4f717] font-mono text-[10px] font-bold border border-[#5a38fd]/60">
+                          #{claim.rank}
+                        </span>
+                      )}
                     </p>
                   </div>
                 </div>

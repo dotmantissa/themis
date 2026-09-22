@@ -336,6 +336,7 @@ export function ThemisProvider({ children }) {
     poolDepositGen,
     finalitySeconds,
     durationSeconds,
+    rewardRecipientsCount = 1,
   }) => {
     setSubmitting(true);
     setFeedbackMessage(null);
@@ -359,6 +360,7 @@ export function ThemisProvider({ children }) {
           poolDepositWei: poolWei,
           finalitySeconds: finalitySeconds || 3600,
           durationSeconds: durationSeconds || 604800,
+          rewardRecipientsCount: Number(rewardRecipientsCount) || 1,
         }),
       });
 
@@ -370,7 +372,7 @@ export function ThemisProvider({ children }) {
       setFeedbackMessage({
         type: "success",
         title: "Grant Round Funded",
-        message: `Round ${roundId} created and funded with ${poolDepositGen} GEN.`,
+        message: `Round ${roundId} created with ${rewardRecipientsCount} reward slot(s) and funded with ${poolDepositGen} GEN.`,
       });
 
       await refreshData();
@@ -382,6 +384,44 @@ export function ThemisProvider({ children }) {
       setFeedbackMessage({
         type: "error",
         title: "Round Creation Failed",
+        message: err.message,
+      });
+      throw err;
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Finalize round rewards after deadline elapses
+  const finalizeRound = async (roundId) => {
+    setSubmitting(true);
+    setFeedbackMessage(null);
+    try {
+      const res = await fetch(`/api/rounds/${roundId}/finalize`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-user-email": user?.email?.address || "relayer@themis.grant",
+        },
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to finalize round");
+      }
+
+      setFeedbackMessage({
+        type: "success",
+        title: "Round Finalized & Rewards Distributed",
+        message: "Top-ranking ideas have shared the pool! Honest non-winners refunded.",
+      });
+
+      await refreshData();
+      return data;
+    } catch (err) {
+      setFeedbackMessage({
+        type: "error",
+        title: "Round Finalization Failed",
         message: err.message,
       });
       throw err;
@@ -409,6 +449,7 @@ export function ThemisProvider({ children }) {
         settleClaim,
         appealClaim,
         createRound,
+        finalizeRound,
         user,
         authenticated,
         login,

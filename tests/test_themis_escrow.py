@@ -565,93 +565,171 @@ def test_claim_rejection_after_duration_expires():
     assert round_data["status"] == "EXPIRED"
 
 
-def test_claim_rejection_when_pool_exhausted():
+def test_top_ranking_projects_share_pool_at_deadline():
     contract = create_test_contract()
-    # Fund round with exactly 1 GEN (covers exactly 1 grant payout)
-    mock_gl.message = MockSender(address="0xdao", value=1000000000000000000)
+    # Fund round with 2 GEN for 2 top winners (1 GEN each)
+    mock_gl.message = MockSender(address="0xdao", value=2000000000000000000)
     mock_gl.message_raw = {"datetime": "2026-09-22T10:00:00Z"}
     contract.create_round(
-        round_id="one-grant-pool",
-        title="Single Grant Pool",
-        description="Covers one grant only",
-        grant_amount_wei=1000000000000000000,  # 1 GEN
-        required_bond_wei=100000000000000000,   # 0.1 GEN
+        round_id="top-ranking-round",
+        title="Top Strengths Grant Round",
+        description="Top 2 ideas share the pool",
+        grant_amount_wei=1000000000000000000,   # 1 GEN per winner
+        required_bond_wei=100000000000000000,    # 0.1 GEN bond
         finality_window_seconds=60,
-        duration_seconds=604800,
+        duration_seconds=3600,                   # 1 hour
+        reward_recipients_count=2,
     )
 
-    # Claimant 1 submits and gets approved
-    mock_gl.message = MockSender(address="0xclaimant1", value=100000000000000000)
     mock_pr_response = MagicMock()
-    mock_pr_response.body = json.dumps({"title": "PR 1", "merged": True}).encode("utf-8")
+    mock_pr_response.body = json.dumps({"title": "PR merged", "merged": True}).encode("utf-8")
     mock_gl.nondet.web.get = MagicMock(return_value=mock_pr_response)
-    mock_gl.nondet.web.render = MagicMock(return_value="<html>activity</html>")
-    mock_gl.nondet.exec_prompt = MagicMock(return_value={"sybil_score": 10, "fraud_detected": False, "sybil_tier": "ORGANIC", "reasoning": "Organic"})
+    mock_gl.nondet.web.render = MagicMock(return_value="<html>contributions</html>")
 
-    contract.submit_grant_claim(
-        claim_id="claim-1",
-        round_id="one-grant-pool",
+    # 1. Project A: High strength score (95)
+    mock_gl.message = MockSender(address="0xclaimantA", value=100000000000000000)
+    mock_gl.message_raw = {"datetime": "2026-09-22T10:10:00Z"}
+    mock_gl.nondet.exec_prompt = MagicMock(return_value={
+        "sybil_score": 10,
+        "fraud_detected": False,
+        "sybil_tier": "ORGANIC",
+        "strength_score": 95,
+        "strength_assessment": "Exceptional architecture and test coverage",
+        "reasoning": "Organic contributor with stellar PR",
+    })
+    res_a = contract.submit_grant_claim(
+        claim_id="claim-a",
+        round_id="top-ranking-round",
         pr_url="https://github.com/org/repo/pull/1",
-        activity_url="https://github.com/claimant1",
+        activity_url="https://github.com/claimantA",
     )
+    assert json.loads(res_a)["status"] == "ADJUDICATED"
 
-    # Settle claim 1 after finality window
-    mock_gl.message_raw = {"datetime": "2026-09-22T10:05:00Z"}
-    settle_res = contract.settle_claim("claim-1")
-    assert json.loads(settle_res)["status"] == "SETTLED"
+    # 2. Project B: Good strength score (82)
+    mock_gl.message = MockSender(address="0xclaimantB", value=100000000000000000)
+    mock_gl.message_raw = {"datetime": "2026-09-22T10:15:00Z"}
+    mock_gl.nondet.exec_prompt = MagicMock(return_value={
+        "sybil_score": 15,
+        "fraud_detected": False,
+        "sybil_tier": "ORGANIC",
+        "strength_score": 82,
+        "strength_assessment": "Strong idea and clean implementation",
+        "reasoning": "Legitimate contributor",
+    })
+    res_b = contract.submit_grant_claim(
+        claim_id="claim-b",
+        round_id="top-ranking-round",
+        pr_url="https://github.com/org/repo/pull/2",
+        activity_url="https://github.com/claimantB",
+    )
+    assert json.loads(res_b)["status"] == "ADJUDICATED"
 
-    # Pool is now exhausted (remaining_pool = 0)
-    round_data = json.loads(contract.get_round("one-grant-pool"))
+    # 3. Project C: Runner up strength score (65)
+    mock_gl.message = MockSender(address="0xclaimantC", value=100000000000000000)
+    mock_gl.message_raw = {"datetime": "2026-09-22T10:20:00Z"}
+    mock_gl.nondet.exec_prompt = MagicMock(return_value={
+        "sybil_score": 20,
+        "fraud_detected": False,
+        "sybil_tier": "ORGANIC",
+        "strength_score": 65,
+        "strength_assessment": "Average implementation, minimal tests",
+        "reasoning": "Organic but lower relative strength",
+    })
+    res_c = contract.submit_grant_claim(
+        claim_id="claim-c",
+        round_id="top-ranking-round",
+        pr_url="https://github.com/org/repo/pull/3",
+        activity_url="https://github.com/claimantC",
+    )
+    assert json.loads(res_c)["status"] == "ADJUDICATED"
+
+    # 4. Project D: Sybil Fraud
+    mock_gl.message = MockSender(address="0xclaimantD", value=100000000000000000)
+    mock_gl.message_raw = {"datetime": "2026-09-22T10:25:00Z"}
+    mock_gl.nondet.exec_prompt = MagicMock(return_value={
+        "sybil_score": 95,
+        "fraud_detected": True,
+        "sybil_tier": "FARM",
+        "strength_score": 10,
+        "strength_assessment": "Fraudulent PR farm bot",
+        "reasoning": "Bot ring detected",
+    })
+    res_d = contract.submit_grant_claim(
+        claim_id="claim-d",
+        round_id="top-ranking-round",
+        pr_url="https://github.com/org/repo/pull/4",
+        activity_url="https://github.com/claimantD",
+    )
+    assert json.loads(res_d)["status"] == "ADJUDICATED"
+
+    # Attempting to settle before deadline expires MUST FAIL
+    mock_gl.message_raw = {"datetime": "2026-09-22T10:30:00Z"}
+    with pytest.raises(ValueError, match="Grant round timeline has not elapsed yet"):
+        contract.settle_claim("claim-a")
+
+    # Advance time past deadline (11:05:00Z) and finalize payouts
+    mock_gl.message_raw = {"datetime": "2026-09-22T11:05:00Z"}
+    final_res = json.loads(contract.finalize_round_payouts("top-ranking-round"))
+    assert final_res["status"] == "SETTLED"
+    assert final_res["winners_count"] == 2
+    assert "claim-a" in final_res["winning_claim_ids"]
+    assert "claim-b" in final_res["winning_claim_ids"]
+    assert final_res["runners_up_count"] == 1
+
+    # Verify Claim A (Rank 1 Winner)
+    claim_a = json.loads(contract.get_claim("claim-a"))
+    assert claim_a["status"] == "SETTLED"
+    assert claim_a["verdict"] == "APPROVED"
+    assert claim_a["rank"] == 1
+    assert claim_a["reward_payout_wei"] == "1000000000000000000"
+
+    # Verify Claim B (Rank 2 Winner)
+    claim_b = json.loads(contract.get_claim("claim-b"))
+    assert claim_b["status"] == "SETTLED"
+    assert claim_b["verdict"] == "APPROVED"
+    assert claim_b["rank"] == 2
+    assert claim_b["reward_payout_wei"] == "1000000000000000000"
+
+    # Verify Claim C (Honest Runner-up: refunded bond, 0 grant)
+    claim_c = json.loads(contract.get_claim("claim-c"))
+    assert claim_c["status"] == "REFUNDED"
+    assert claim_c["verdict"] == "HONEST_RUNNER_UP"
+    assert claim_c["rank"] == 3
+    assert claim_c["reward_payout_wei"] == "0"
+
+    # Verify Claim D (Sybil Fraud: Slashed)
+    claim_d = json.loads(contract.get_claim("claim-d"))
+    assert claim_d["status"] == "SLASHED"
+    assert claim_d["verdict"] == "REJECTED_SYBIL_FRAUD"
+
+    # Verify round status and remaining pool
+    round_data = json.loads(contract.get_round("top-ranking-round"))
+    assert round_data["status"] == "SETTLED"
     assert round_data["remaining_pool_wei"] == "0"
-    assert round_data["status"] == "EXHAUSTED"
-
-    # Claimant 2 tries to submit -> must revert
-    mock_gl.message = MockSender(address="0xclaimant2", value=100000000000000000)
-    with pytest.raises(ValueError, match="Grant round pool is exhausted; no further applications accepted"):
-        contract.submit_grant_claim(
-            claim_id="claim-2",
-            round_id="one-grant-pool",
-            pr_url="https://github.com/org/repo/pull/2",
-            activity_url="https://github.com/claimant2",
-        )
 
 
-def test_deposit_funds_reopens_exhausted_round():
+def test_deposit_round_funds_increases_pool_accounting():
     contract = create_test_contract()
     mock_gl.message = MockSender(address="0xdao", value=1000000000000000000)
     mock_gl.message_raw = {"datetime": "2026-09-22T10:00:00Z"}
     contract.create_round(
-        round_id="reopen-round",
-        title="Reopenable Round",
-        description="Can be refueled",
+        round_id="deposit-test-round",
+        title="Fundable Round",
+        description="Receives additional funds",
         grant_amount_wei=1000000000000000000,
         required_bond_wei=100000000000000000,
         finality_window_seconds=60,
         duration_seconds=86400,
     )
 
-    # Exhaust it with 1 claim and settlement
-    mock_gl.message = MockSender(address="0xclaimant", value=100000000000000000)
-    mock_pr = MagicMock()
-    mock_pr.body = json.dumps({"title": "PR", "merged": True}).encode("utf-8")
-    mock_gl.nondet.web.get = MagicMock(return_value=mock_pr)
-    mock_gl.nondet.web.render = MagicMock(return_value="<html>activity</html>")
-    mock_gl.nondet.exec_prompt = MagicMock(return_value={"sybil_score": 10, "fraud_detected": False, "sybil_tier": "ORGANIC", "reasoning": "Organic"})
+    # DAO deposits another 3 GEN
+    mock_gl.message = MockSender(address="0xdao", value=3000000000000000000)
+    dep_res = json.loads(contract.deposit_round_funds("deposit-test-round"))
+    assert dep_res["new_pool_wei"] == "4000000000000000000"
+    assert dep_res["new_remaining_pool_wei"] == "4000000000000000000"
 
-    contract.submit_grant_claim(
-        claim_id="first-claim",
-        round_id="reopen-round",
-        pr_url="https://github.com/org/repo/pull/1",
-        activity_url="https://github.com/claimant",
-    )
-    mock_gl.message_raw = {"datetime": "2026-09-22T10:05:00Z"}
-    contract.settle_claim("first-claim")
+    round_data = json.loads(contract.get_round("deposit-test-round"))
+    assert round_data["pool_wei"] == "4000000000000000000"
+    assert round_data["remaining_pool_wei"] == "4000000000000000000"
 
-    assert json.loads(contract.get_round("reopen-round"))["status"] == "EXHAUSTED"
-
-    # DAO deposits another 2 GEN while within duration
-    mock_gl.message = MockSender(address="0xdao", value=2000000000000000000)
-    dep_res = contract.deposit_round_funds("reopen-round")
-    assert json.loads(dep_res)["status"] == "OPEN"
-    assert json.loads(contract.get_round("reopen-round"))["status"] == "OPEN"
 

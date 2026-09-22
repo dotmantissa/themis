@@ -176,9 +176,7 @@ class ThemisGrantEscrow(gl.Contract):
         now_ts = int(self._now())
 
         if round_data.get("status") == "OPEN":
-            if rem_pool < grant_amt:
-                round_data["status"] = "EXHAUSTED"
-            elif expires_at > 0 and now_ts >= expires_at:
+            if expires_at > 0 and now_ts >= expires_at:
                 round_data["status"] = "EXPIRED"
 
         return json.dumps(round_data, sort_keys=True)
@@ -290,10 +288,12 @@ class ThemisGrantEscrow(gl.Contract):
         required_bond_wei: int,
         finality_window_seconds: int = 0,
         duration_seconds: int = 604800,
+        reward_recipients_count: int = 1,
     ) -> str:
         """
         Create a new grant allocation round funded with real GEN deposit.
-        The creator specifies the application duration window during which claims can be submitted.
+        The creator configures the application duration, the amount per reward,
+        and how many top projects will share the pool at the deadline.
         """
         clean_round_id = str(round_id).strip()
         clean_title = str(title).strip()
@@ -306,8 +306,14 @@ class ThemisGrantEscrow(gl.Contract):
         self._require(int(required_bond_wei) > 0, "required_bond_wei must be positive")
         self._require(int(duration_seconds) > 0, "duration_seconds must be positive")
 
+        recipients_count = max(1, int(reward_recipients_count))
+        total_reward_needed = recipients_count * int(grant_amount_wei)
+
         deposited_pool = int(gl.message.value)
-        self._require(deposited_pool >= int(grant_amount_wei), "Initial deposit must cover at least one grant payout")
+        self._require(
+            deposited_pool >= total_reward_needed,
+            f"Initial deposit {deposited_pool} wei must cover reward pool ({total_reward_needed} wei for {recipients_count} recipient(s))"
+        )
 
         finality_window = int(finality_window_seconds)
         if finality_window <= 0:
@@ -326,6 +332,9 @@ class ThemisGrantEscrow(gl.Contract):
             "pool_wei": str(deposited_pool),
             "remaining_pool_wei": str(deposited_pool),
             "grant_amount_per_claim_wei": str(grant_amount_wei),
+            "reward_amount_per_recipient_wei": str(grant_amount_wei),
+            "reward_recipients_count": recipients_count,
+            "max_winners": recipients_count,
             "required_bond_wei": str(required_bond_wei),
             "finality_window_seconds": finality_window,
             "duration_seconds": duration_sec,
@@ -334,7 +343,9 @@ class ThemisGrantEscrow(gl.Contract):
             "total_claims": 0,
             "approved_claims": 0,
             "rejected_claims": 0,
+            "winning_claims": 0,
             "created_at": int(now_ts),
+            "settled_at": 0,
         }
 
         self.rounds[clean_round_id] = json.dumps(round_data, sort_keys=True)
@@ -349,6 +360,7 @@ class ThemisGrantEscrow(gl.Contract):
             "status": "OPEN",
             "deposited_pool_wei": str(deposited_pool),
             "grant_amount_wei": str(grant_amount_wei),
+            "reward_recipients_count": recipients_count,
             "required_bond_wei": str(required_bond_wei),
             "finality_window_seconds": finality_window,
             "duration_seconds": duration_sec,
@@ -369,17 +381,9 @@ class ThemisGrantEscrow(gl.Contract):
         current_pool = int(round_data.get("pool_wei", 0))
         current_rem = int(round_data.get("remaining_pool_wei", 0))
         new_rem = current_rem + additional_funds
-        grant_amt = int(round_data.get("grant_amount_per_claim_wei", 0))
-        expires_at = int(round_data.get("expires_at", 0))
-        now_ts = int(self._now())
 
         round_data["pool_wei"] = str(current_pool + additional_funds)
         round_data["remaining_pool_wei"] = str(new_rem)
-
-        # If previously exhausted and new funds cover at least one grant, re-open if still in duration
-        if round_data.get("status") == "EXHAUSTED" and new_rem >= grant_amt:
-            if expires_at == 0 or now_ts < expires_at:
-                round_data["status"] = "OPEN"
 
         self.rounds[clean_id] = json.dumps(round_data, sort_keys=True)
 
@@ -436,23 +440,17 @@ class ThemisGrantEscrow(gl.Contract):
         round_data = json.loads(self.rounds[clean_round_id])
         now_ts = self._now()
         expires_at = int(round_data.get("expires_at", 0))
-        remaining_pool = int(round_data.get("remaining_pool_wei", 0))
-        grant_amount = int(round_data.get("grant_amount_per_claim_wei", 0))
 
         # Check duration expiry: grant ends when timeline elapses
         if expires_at > 0 and int(now_ts) >= expires_at:
-            round_data["status"] = "EXPIRED"
-            self.rounds[clean_round_id] = json.dumps(round_data, sort_keys=True)
+            if round_data.get("status") == "OPEN":
+                round_data["status"] = "EXPIRED"
+                self.rounds[clean_round_id] = json.dumps(round_data, sort_keys=True)
             self._require(False, "Grant round timeline has elapsed; applications are closed")
-
-        # Check pool exhaustion: grant ends when pool is depleted below grant payout
-        if remaining_pool < grant_amount:
-            round_data["status"] = "EXHAUSTED"
-            self.rounds[clean_round_id] = json.dumps(round_data, sort_keys=True)
-            self._require(False, "Grant round pool is exhausted; no further applications accepted")
 
         self._require(round_data.get("status") == "OPEN", f"Grant round is {round_data.get('status', 'not open')}")
 
+        grant_amount = int(round_data.get("reward_amount_per_recipient_wei", round_data.get("grant_amount_per_claim_wei", 0)))
         required_bond = int(round_data.get("required_bond_wei", 0))
         posted_bond = int(gl.message.value)
         self._require(posted_bond >= required_bond, f"Posted bond {posted_bond} wei is below required {required_bond} wei")
@@ -493,7 +491,6 @@ class ThemisGrantEscrow(gl.Contract):
             # 2. Evidence primitive 2: Dynamic render with JS execution for activity & sybil graph
             activity_rendered = ""
             try:
-                # render with DOM evaluation
                 rendered_page = gl.nondet.web.render(cap_activity_url)
                 if isinstance(rendered_page, str):
                     clean_render = re.sub(r"<[^>]+>", " ", rendered_page)
@@ -508,63 +505,66 @@ class ThemisGrantEscrow(gl.Contract):
             if cap_screenshot_url.startswith("http"):
                 screenshot_note = f"Supplementary Screenshot provided: {cap_screenshot_url}"
 
-            # 4. Sybil Rubric Scoring Prompt (Tier 2: Prompt Non-Comparative Evaluation)
-            sybil_prompt = f"""You are an objective forensic validator for Themis Grant Escrow.
-Evaluate whether the grant claimant demonstrates organic development tenure or exhibits sybil cluster / automated fraud patterns.
+            # 4. Two-Axis Rubric: Sybil Forensic + Project Strength & Execution Quality
+            eval_prompt = f"""You are an objective expert evaluator and forensic validator for Themis Grant Escrow.
+Evaluate this grant milestone claim on two critical axes:
+1. Sybil / Automated Fraud Detection
+2. Project Strength of Idea & Execution Quality
 
 CLAIMANT ADDRESS: {cap_sender}
-CLAIMANT SUBMISSION NOTES: {cap_notes}
+CLAIMANT PROJECT NOTES & SPEC: {cap_notes}
 STATIC GIT PR PROOF: {pr_data_summary}
 DYNAMIC ACTIVITY & TENURE DATA: {activity_rendered}
 SUPPLEMENTARY PROOF: {screenshot_note}
 
 EVALUATION RUBRIC:
-1. Activity Breadth & Tenure:
-   - Organic: Account has realistic commit activity, natural commit timestamps, or legitimate historical transactions.
-   - Sybil: Created immediately prior to the round, zero historical presence, batch-minted activity, or repetitive boilerplate.
-2. Contribution Substance:
-   - Organic: Meaningful code or documentation aligned with grant scope.
-   - Sybil: Empty commits, trivial white-space churn, circular repository forks, or copy-pasted templates.
-3. Cluster Patterns:
-   - High risk: Clustered co-funding, identical submitter fingerprints, circular funding rings.
-   - Low risk: Independent actor with genuine decentralized presence.
+Axis 1: Sybil / Forensic Analysis:
+- Organic (0-35): Established account, natural commit timestamps, genuine developer identity.
+- Suspicious (36-59): Limited history, low diversity of commits.
+- Confirmed Sybil (60-100): Zero history, mass-generated activity, boilerplate churn, automated scripts.
+- fraud_detected is TRUE if sybil_score >= 60.
 
-Determine:
-- sybil_score: Integer from 0 (completely organic) to 100 (confirmed sybil cluster/fraud).
-- fraud_detected: Boolean (true if sybil_score >= 60, false otherwise).
-- sybil_tier: One of "ORGANIC" (0-35), "SUSPICIOUS" (36-59), or "CONFIRMED_SYBIL" (60-100).
-- reasoning: Concise 1-2 sentence justification.
+Axis 2: Project Strength of Idea & Execution:
+- Evaluate technical ambition, usefulness, execution completeness, and quality of the work.
+- strength_score: Integer from 0 (trivial/poor) to 100 (groundbreaking idea with high quality execution).
+- strength_assessment: 1-2 sentence review detailing idea strength and execution merit.
 
 Respond strictly in valid JSON:
 {{
   "sybil_score": integer (0 to 100),
   "fraud_detected": boolean,
   "sybil_tier": "ORGANIC" or "SUSPICIOUS" or "CONFIRMED_SYBIL",
+  "strength_score": integer (0 to 100),
+  "strength_assessment": "string",
   "reasoning": "string"
 }}
 """
-            sybil_eval = {}
+            eval_res = {}
             try:
-                raw_eval = gl.nondet.exec_prompt(sybil_prompt, response_format="json")
+                raw_eval = gl.nondet.exec_prompt(eval_prompt, response_format="json")
                 if isinstance(raw_eval, dict):
-                    sybil_eval = raw_eval
+                    eval_res = raw_eval
                 elif isinstance(raw_eval, str):
-                    sybil_eval = json.loads(raw_eval)
+                    eval_res = json.loads(raw_eval)
             except Exception:
-                sybil_eval = {
+                eval_res = {
                     "sybil_score": 15,
                     "fraud_detected": False,
                     "sybil_tier": "ORGANIC",
+                    "strength_score": 75,
+                    "strength_assessment": "Sound idea and functional implementation",
                     "reasoning": "Default verification baseline applied",
                 }
 
-            sybil_score = max(0, min(100, int(sybil_eval.get("sybil_score", 15))))
-            fraud_detected = bool(sybil_eval.get("fraud_detected", sybil_score >= 60))
-            sybil_tier = str(sybil_eval.get("sybil_tier", "ORGANIC")).upper()
+            sybil_score = max(0, min(100, int(eval_res.get("sybil_score", 15))))
+            fraud_detected = bool(eval_res.get("fraud_detected", sybil_score >= 60))
+            sybil_tier = str(eval_res.get("sybil_tier", "ORGANIC")).upper()
             if sybil_tier not in ("ORGANIC", "SUSPICIOUS", "CONFIRMED_SYBIL"):
                 sybil_tier = "CONFIRMED_SYBIL" if fraud_detected else "ORGANIC"
 
-            reasoning = str(sybil_eval.get("reasoning", "Evidence adjudicated"))[:300]
+            strength_score = max(0, min(100, int(eval_res.get("strength_score", 75))))
+            strength_assessment = str(eval_res.get("strength_assessment", eval_res.get("reasoning", "Evidence evaluated")))[:300]
+            reasoning = str(eval_res.get("reasoning", strength_assessment))[:300]
 
             # Composite verdict derivation
             if not pr_merged:
@@ -579,6 +579,8 @@ Respond strictly in valid JSON:
                 "sybil_score": sybil_score,
                 "fraud_detected": fraud_detected,
                 "sybil_tier": sybil_tier,
+                "strength_score": strength_score,
+                "strength_assessment": strength_assessment,
                 "verdict": composite_verdict,
                 "reasoning": reasoning,
             }
@@ -586,7 +588,7 @@ Respond strictly in valid JSON:
         def validator_fn(leader_res: typing.Any) -> bool:
             """
             Custom validator equivalence function for gl.vm.run_nondet_unsafe.
-            Enforces strict_eq on Tier 1 (PR merged) and rubric tolerance on Tier 2 (Sybil score).
+            Enforces strict_eq on Tier 1 (PR merged) and rubric tolerance on Tier 2.
             """
             if not isinstance(leader_res, gl.vm.Return):
                 return False
@@ -619,7 +621,13 @@ Respond strictly in valid JSON:
             if abs(l_score - m_score) > 20:
                 return False
 
-            # Equivalence Rule 4: Composite verdict must match exactly
+            # Equivalence Rule 4: Strength score tolerance band of 25 points
+            l_strength = int(leader_dict.get("strength_score", 50))
+            m_strength = int(mine.get("strength_score", 50))
+            if abs(l_strength - m_strength) > 25:
+                return False
+
+            # Equivalence Rule 5: Composite verdict must match
             if str(leader_dict.get("verdict", "")).strip().upper() != str(mine["verdict"]).strip().upper():
                 return False
 
@@ -648,6 +656,8 @@ Respond strictly in valid JSON:
                     "sybil_score": 20,
                     "fraud_detected": False,
                     "sybil_tier": "ORGANIC",
+                    "strength_score": 50,
+                    "strength_assessment": "Adjudication fallback",
                     "verdict": "REJECTED_PR_NOT_MERGED",
                     "reasoning": "Consensus adjudication fallback",
                 }
@@ -656,6 +666,8 @@ Respond strictly in valid JSON:
         final_sybil_score = max(0, min(100, int(verdict_dict.get("sybil_score", 20))))
         final_fraud_detected = bool(verdict_dict.get("fraud_detected", False))
         final_sybil_tier = str(verdict_dict.get("sybil_tier", "ORGANIC")).upper()
+        final_strength_score = max(0, min(100, int(verdict_dict.get("strength_score", 75))))
+        final_strength_assessment = str(verdict_dict.get("strength_assessment", "Execution verified"))[:300]
         final_verdict = str(verdict_dict.get("verdict", "REJECTED_PR_NOT_MERGED")).upper()
         final_reasoning = str(verdict_dict.get("reasoning", "Evidence processed"))
 
@@ -684,6 +696,9 @@ Respond strictly in valid JSON:
             "tier2_sybil_score": final_sybil_score,
             "tier2_sybil_tier": final_sybil_tier,
             "fraud_detected": final_fraud_detected,
+            "strength_score": final_strength_score,
+            "strength_assessment": final_strength_assessment,
+            "rank": 0,
             "verdict": final_verdict,
             "verdict_reasoning": final_reasoning,
             "settlement_tx_hash": "",
@@ -744,21 +759,156 @@ Respond strictly in valid JSON:
     # ─────────────────────────────────────────────────────────────────────────
 
     @gl.public.write
+    def finalize_round_payouts(self, round_id: str) -> str:
+        """
+        Finalize grant round after deadline elapses and allocate pool to top ranking projects.
+        1. Projects that pass validator checks (PR merged) and sybil checks qualify.
+        2. Qualified projects are ranked by strength of idea and execution.
+        3. The top N (reward_recipients_count) projects share the pool and receive rewards + bond refund.
+        4. Sybil fraud bonds are slashed into dispute bounty pool.
+        5. Honest non-winning projects receive their refundable bonds back.
+        """
+        clean_id = str(round_id).strip()
+        self._require(clean_id in self.rounds, "round_id not found")
+
+        round_data = json.loads(self.rounds[clean_id])
+        self._require(round_data.get("status") != "SETTLED", "Grant round has already been settled and finalized")
+
+        now_ts = int(self._now())
+        expires_at = int(round_data.get("expires_at", 0))
+        self._require(now_ts >= expires_at, f"Grant round timeline has not elapsed yet ({expires_at - now_ts}s remaining)")
+
+        recipients_count = int(round_data.get("reward_recipients_count", round_data.get("max_winners", 1)))
+        reward_per_winner = int(round_data.get("reward_amount_per_recipient_wei", round_data.get("grant_amount_per_claim_wei", 0)))
+        remaining_pool = int(round_data.get("remaining_pool_wei", 0))
+
+        claim_ids = []
+        if clean_id in self.round_claims:
+            try:
+                claim_ids = json.loads(self.round_claims[clean_id])
+            except Exception:
+                claim_ids = []
+
+        qualified_claims = []
+        for cid in claim_ids:
+            if cid not in self.claims:
+                continue
+            c = json.loads(self.claims[cid])
+            if c.get("status") in ("SETTLED", "SLASHED"):
+                continue
+
+            bond_wei = int(c.get("bond_wei", 0))
+            claimant_addr = Address(c.get("claimant"))
+
+            # Slashes for sybil fraud
+            if c.get("fraud_detected", False):
+                self.total_bonds_slashed_wei = u256(int(self.total_bonds_slashed_wei) + bond_wei)
+                self.dispute_bounty_pool_wei = u256(int(self.dispute_bounty_pool_wei) + bond_wei)
+                c["status"] = "SLASHED"
+                c["verdict"] = "REJECTED_SYBIL_FRAUD"
+                c["settled_at"] = now_ts
+                self.claims[cid] = json.dumps(c, sort_keys=True)
+                continue
+
+            # Honest mistake: PR not merged
+            if not c.get("tier1_pr_merged", False):
+                self.total_bonds_refunded_wei = u256(int(self.total_bonds_refunded_wei) + bond_wei)
+                c["status"] = "REFUNDED"
+                c["verdict"] = "REJECTED_PR_NOT_MERGED"
+                c["settled_at"] = now_ts
+                self.claims[cid] = json.dumps(c, sort_keys=True)
+                if bond_wei > 0:
+                    target = gl.get_contract_at(claimant_addr)
+                    target.emit_transfer(value=u256(bond_wei), on="finalized")
+                continue
+
+            # Qualified project for ranking
+            qualified_claims.append(c)
+
+        # Rank qualified projects by strength_score descending, tiebreak by submitted_at ascending
+        qualified_claims.sort(
+            key=lambda x: (-int(x.get("strength_score", 0)), int(x.get("submitted_at", 0)))
+        )
+
+        winners = []
+        runners_up = []
+
+        for idx, c in enumerate(qualified_claims):
+            cid = c["claim_id"]
+            rank = idx + 1
+            c["rank"] = rank
+            claimant_addr = Address(c.get("claimant"))
+            bond_wei = int(c.get("bond_wei", 0))
+
+            if rank <= recipients_count and remaining_pool >= reward_per_winner:
+                # Top-ranking project: shares the pool
+                total_payout = reward_per_winner + bond_wei
+                remaining_pool -= reward_per_winner
+                self.total_grants_disbursed_wei = u256(int(self.total_grants_disbursed_wei) + reward_per_winner)
+                self.total_bonds_refunded_wei = u256(int(self.total_bonds_refunded_wei) + bond_wei)
+
+                c["status"] = "SETTLED"
+                c["verdict"] = "APPROVED"
+                c["settled_at"] = now_ts
+                c["reward_payout_wei"] = str(reward_per_winner)
+                self.claims[cid] = json.dumps(c, sort_keys=True)
+                winners.append(cid)
+
+                target = gl.get_contract_at(claimant_addr)
+                target.emit_transfer(value=u256(total_payout), on="finalized")
+            else:
+                # Honest runner-up: bond refunded, no grant payout
+                self.total_bonds_refunded_wei = u256(int(self.total_bonds_refunded_wei) + bond_wei)
+                c["status"] = "REFUNDED"
+                c["verdict"] = "HONEST_RUNNER_UP"
+                c["settled_at"] = now_ts
+                c["reward_payout_wei"] = "0"
+                self.claims[cid] = json.dumps(c, sort_keys=True)
+                runners_up.append(cid)
+
+                if bond_wei > 0:
+                    target = gl.get_contract_at(claimant_addr)
+                    target.emit_transfer(value=u256(bond_wei), on="finalized")
+
+        round_data["remaining_pool_wei"] = str(remaining_pool)
+        round_data["status"] = "SETTLED"
+        round_data["settled_at"] = now_ts
+        round_data["winning_claims"] = len(winners)
+        self.rounds[clean_id] = json.dumps(round_data, sort_keys=True)
+
+        return json.dumps({
+            "round_id": clean_id,
+            "status": "SETTLED",
+            "winners_count": len(winners),
+            "winning_claim_ids": winners,
+            "runners_up_count": len(runners_up),
+            "remaining_pool_wei": str(remaining_pool),
+        })
+
+    @gl.public.write
     def settle_claim(self, claim_id: str) -> str:
         """
         Execute deterministic fund custody release or bond slashing for an adjudicated claim.
-        Enforces native protocol finality window: cannot settle while appeal window is open.
-
-        Payout rules:
-        - APPROVED: Grant pool funds + bond refund move to claimant via emit_transfer.
-        - REJECTED_SYBIL_FRAUD: Bond is slashed into dispute bounty pool.
-        - REJECTED_PR_NOT_MERGED: Bond is refunded to claimant (honest mistake, no fraud).
+        If round has expired and not yet settled, executes round ranking finalization.
         """
         clean_id = str(claim_id).strip()
         self._require(clean_id in self.claims, "Claim not found")
 
         claim = json.loads(self.claims[clean_id])
+        round_id = str(claim.get("round_id", ""))
+        self._require(round_id in self.rounds, "Associated round not found")
+        round_data = json.loads(self.rounds[round_id])
+
         status = str(claim.get("status", ""))
+        if status in ("SETTLED", "REFUNDED", "SLASHED"):
+            return json.dumps({
+                "claim_id": clean_id,
+                "status": status,
+                "verdict": claim.get("verdict", "APPROVED"),
+                "claimant": claim.get("claimant", ""),
+                "settled_at": claim.get("settled_at", 0),
+            })
+
         self._require(status == "ADJUDICATED", f"Claim is not in ADJUDICATED state (current: {status})")
         self._require(not claim.get("is_appealed", False), "Claim has an active appeal in progress")
 
@@ -766,15 +916,26 @@ Respond strictly in valid JSON:
         finality_exp = int(claim.get("finality_expires_at", 0))
         self._require(now_ts >= finality_exp, f"Native appeal window is still active ({finality_exp - now_ts}s remaining)")
 
-        verdict = str(claim.get("verdict", ""))
-        round_id = str(claim.get("round_id", ""))
-        self._require(round_id in self.rounds, "Associated round not found")
-        round_data = json.loads(self.rounds[round_id])
+        # For competitive rounds or rounds where deadline has elapsed, finalization is required
+        expires_at = int(round_data.get("expires_at", 0))
+        recipients_count = int(round_data.get("reward_recipients_count", round_data.get("max_winners", 1)))
+        if recipients_count > 1 or (expires_at > 0 and now_ts >= expires_at):
+            self._require(now_ts >= expires_at, f"Grant round timeline has not elapsed yet ({expires_at - now_ts}s remaining)")
+            self.finalize_round_payouts(round_id)
+            updated_claim = json.loads(self.claims[clean_id])
+            return json.dumps({
+                "claim_id": clean_id,
+                "status": updated_claim.get("status", "SETTLED"),
+                "verdict": updated_claim.get("verdict", "APPROVED"),
+                "claimant": updated_claim.get("claimant", ""),
+                "claimant_transferred_wei": str(updated_claim.get("reward_payout_wei", "0")),
+                "settled_at": updated_claim.get("settled_at", now_ts),
+            })
 
+        verdict = str(claim.get("verdict", ""))
         claimant_addr = Address(claim.get("claimant"))
         grant_wei = int(claim.get("grant_wei", 0))
         bond_wei = int(claim.get("bond_wei", 0))
-
         remaining_pool = int(round_data.get("remaining_pool_wei", 0))
 
         claimant_transfer_wei = 0
@@ -790,19 +951,13 @@ Respond strictly in valid JSON:
             self.total_bonds_refunded_wei = u256(int(self.total_bonds_refunded_wei) + bond_wei)
             claim["status"] = "SETTLED"
 
-            grant_amt_per_claim = int(round_data.get("grant_amount_per_claim_wei", 0))
-            if new_remaining_pool < grant_amt_per_claim:
-                round_data["status"] = "EXHAUSTED"
-
         elif verdict == "REJECTED_SYBIL_FRAUD":
-            # Bond slashed into protocol dispute bounty pool
             slashed_wei = bond_wei
             self.total_bonds_slashed_wei = u256(int(self.total_bonds_slashed_wei) + slashed_wei)
             self.dispute_bounty_pool_wei = u256(int(self.dispute_bounty_pool_wei) + slashed_wei)
             claim["status"] = "SLASHED"
 
         elif verdict == "REJECTED_PR_NOT_MERGED":
-            # Honest mistake: refund bond, no grant payout
             claimant_transfer_wei = bond_wei
             refunded_bond_wei = bond_wei
             self.total_bonds_refunded_wei = u256(int(self.total_bonds_refunded_wei) + refunded_bond_wei)
@@ -811,10 +966,8 @@ Respond strictly in valid JSON:
         else:
             raise gl.vm.UserError(f"Unknown verdict state: {verdict}")
 
-        # Update round state
         self.rounds[round_id] = json.dumps(round_data, sort_keys=True)
 
-        # Execute native fund custody transfers via ghost contract
         if claimant_transfer_wei > 0:
             target_contract = gl.get_contract_at(claimant_addr)
             target_contract.emit_transfer(value=u256(claimant_transfer_wei), on="finalized")

@@ -67,6 +67,7 @@ export async function initDb() {
 
   await sql`ALTER TABLE rounds ADD COLUMN IF NOT EXISTS duration_seconds INTEGER DEFAULT 604800;`;
   await sql`ALTER TABLE rounds ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP WITH TIME ZONE;`;
+  await sql`ALTER TABLE rounds ADD COLUMN IF NOT EXISTS reward_recipients_count INTEGER DEFAULT 1;`;
 
   // Claims table (mirrors on-chain two-tier verdicts and evidence)
   await sql`
@@ -97,6 +98,11 @@ export async function initDb() {
       created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
   `;
+
+  await sql`ALTER TABLE claims ADD COLUMN IF NOT EXISTS strength_score INTEGER DEFAULT 0;`;
+  await sql`ALTER TABLE claims ADD COLUMN IF NOT EXISTS strength_assessment TEXT;`;
+  await sql`ALTER TABLE claims ADD COLUMN IF NOT EXISTS rank INTEGER DEFAULT 0;`;
+  await sql`ALTER TABLE claims ADD COLUMN IF NOT EXISTS reward_payout_wei VARCHAR(100) DEFAULT '0';`;
 
   // Appeals table
   await sql`

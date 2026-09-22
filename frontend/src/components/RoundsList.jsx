@@ -1,9 +1,9 @@
 import React from "react";
 import { useThemis } from "../context/ThemisContext";
-import { Coins, Shield, Clock, Users, PlusCircle, CheckCircle2 } from "lucide-react";
+import { Coins, Shield, Clock, Users, PlusCircle, CheckCircle2, Trophy, Gavel } from "lucide-react";
 
 export function RoundsList({ onOpenCreateRound, onOpenSubmit }) {
-  const { rounds, selectedRound, setSelectedRound, loading } = useThemis();
+  const { rounds, selectedRound, setSelectedRound, loading, finalizeRound, submitting } = useThemis();
 
   const formatGen = (weiStr) => {
     try {
@@ -70,13 +70,12 @@ export function RoundsList({ onOpenCreateRound, onOpenSubmit }) {
         <div className="space-y-3">
           {rounds.map((round) => {
             const isSelected = selectedRound?.round_id === round.round_id;
-            const isExhausted =
-              round.status === "EXHAUSTED" ||
-              BigInt(round.remaining_pool_wei || "0") < BigInt(round.grant_amount_wei || "0");
+            const isSettled = round.status === "SETTLED";
             const isExpired =
               round.status === "EXPIRED" ||
               (round.expires_at && new Date(round.expires_at).getTime() <= Date.now());
-            const isOpen = round.status === "OPEN" && !isExhausted && !isExpired;
+            const isOpen = !isSettled && !isExpired;
+            const recipientsCount = round.reward_recipients_count || round.max_winners || 1;
 
             return (
               <div
@@ -101,17 +100,17 @@ export function RoundsList({ onOpenCreateRound, onOpenSubmit }) {
                     </p>
                   </div>
 
-                  {isExhausted ? (
-                    <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-300 border border-rose-500/30">
-                      POOL EXHAUSTED
+                  {isSettled ? (
+                    <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                      REWARDS FINALIZED
                     </span>
                   ) : isExpired ? (
                     <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                      TIMELINE ELAPSED
+                      DEADLINE ELAPSED
                     </span>
                   ) : (
                     <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded-full bg-[#d4f717]/15 text-[#d4f717] border border-[#d4f717]/30">
-                      OPEN
+                      APPLICATIONS OPEN
                     </span>
                   )}
                 </div>
@@ -120,7 +119,7 @@ export function RoundsList({ onOpenCreateRound, onOpenSubmit }) {
                   {round.description || "Grant funding for verified contributions."}
                 </p>
 
-                <div className="grid grid-cols-3 gap-2 pt-2 border-t border-[#3b3b6d]/40 text-center">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-[#3b3b6d]/40 text-center">
                   <div className="p-1.5 rounded bg-[#181836]/60">
                     <p className="text-[10px] text-[#a3a3cf]">Available Pool</p>
                     <p className="text-xs font-mono font-bold text-[#d4f717]">
@@ -129,9 +128,17 @@ export function RoundsList({ onOpenCreateRound, onOpenSubmit }) {
                   </div>
 
                   <div className="p-1.5 rounded bg-[#181836]/60">
-                    <p className="text-[10px] text-[#a3a3cf]">Grant Payout</p>
+                    <p className="text-[10px] text-[#a3a3cf]">Per Winner</p>
                     <p className="text-xs font-mono font-semibold text-white">
                       {formatGen(round.grant_amount_wei)} GEN
+                    </p>
+                  </div>
+
+                  <div className="p-1.5 rounded bg-[#181836]/60">
+                    <p className="text-[10px] text-[#a3a3cf]">Reward Slots</p>
+                    <p className="text-xs font-mono font-semibold text-[#d4f717] flex items-center justify-center gap-1">
+                      <Trophy className="w-3 h-3 text-[#d4f717]" />
+                      <span>Top {recipientsCount}</span>
                     </p>
                   </div>
 
@@ -154,18 +161,33 @@ export function RoundsList({ onOpenCreateRound, onOpenSubmit }) {
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          onOpenSubmit();
+                          setSelectedRound(round);
+                          if (typeof onOpenSubmit === "function") {
+                            onOpenSubmit();
+                          }
                         }}
                         className="px-3 py-1 rounded-lg bg-[#d4f717] hover:bg-[#bfe010] text-[#24244f] text-xs font-bold action-btn"
                       >
                         Submit to this Round
                       </button>
+                    ) : isExpired && !isSettled ? (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          finalizeRound(round.round_id);
+                        }}
+                        disabled={submitting}
+                        className="px-3 py-1 rounded-lg bg-gradient-to-r from-[#5a38fd] to-[#7c5cfc] hover:opacity-90 text-white text-xs font-bold action-btn flex items-center gap-1"
+                      >
+                        <Gavel className="w-3 h-3 text-[#d4f717]" />
+                        <span>{submitting ? "Finalizing..." : "Finalize & Distribute Rewards"}</span>
+                      </button>
                     ) : (
                       <button
                         disabled
-                        className="px-3 py-1 rounded-lg bg-[#181836] border border-[#3b3b6d] text-[#a3a3cf] text-xs font-semibold cursor-not-allowed opacity-75"
+                        className="px-3 py-1 rounded-lg bg-[#181836] border border-[#3b3b6d] text-emerald-300 text-xs font-semibold cursor-not-allowed opacity-80"
                       >
-                        {isExhausted ? "Pool Exhausted" : "Applications Closed"}
+                        Rewards Settled
                       </button>
                     )}
                   </div>

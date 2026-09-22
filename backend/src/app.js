@@ -11,6 +11,7 @@ import {
   readClaimsByRoundOnChain,
   submitClaimAbstracted,
   createRoundAbstracted,
+  finalizeRoundAbstracted,
   settleClaimAbstracted,
   appealClaimAbstracted,
   dripNativeGen,
@@ -288,7 +289,7 @@ app.get(["/api/rounds", "/rounds"], async (req, res) => {
             INSERT INTO rounds (
               round_id, creator, title, description,
               pool_wei, remaining_pool_wei, grant_amount_wei, bond_amount_wei,
-              finality_window_seconds, duration_seconds, expires_at, status, created_at
+              finality_window_seconds, duration_seconds, reward_recipients_count, expires_at, status, created_at
             ) VALUES (
               ${rid},
               ${onChainData.creator || "0x0"},
@@ -296,10 +297,11 @@ app.get(["/api/rounds", "/rounds"], async (req, res) => {
               ${onChainData.description || ""},
               ${onChainData.pool_wei || "0"},
               ${onChainData.remaining_pool_wei || "0"},
-              ${onChainData.grant_amount_per_claim_wei || "0"},
+              ${onChainData.reward_amount_per_recipient_wei || onChainData.grant_amount_per_claim_wei || "0"},
               ${onChainData.required_bond_wei || "0"},
               ${Number(onChainData.finality_window_seconds || 3600)},
               ${Number(onChainData.duration_seconds || 604800)},
+              ${Number(onChainData.reward_recipients_count || onChainData.max_winners || 1)},
               ${expiresAtVal},
               ${onChainData.status || "OPEN"},
               to_timestamp(${Number(onChainData.created_at || Math.floor(Date.now() / 1000))})
@@ -315,14 +317,11 @@ app.get(["/api/rounds", "/rounds"], async (req, res) => {
     const nowMs = Date.now();
     const evaluatedRounds = refreshedRounds.map((r) => {
       let status = r.status || "OPEN";
-      const remaining = BigInt(r.remaining_pool_wei || "0");
-      const grantAmt = BigInt(r.grant_amount_wei || "0");
       const expiresAtMs = r.expires_at ? new Date(r.expires_at).getTime() : null;
-
-      if (remaining < grantAmt) {
-        status = "EXHAUSTED";
-      } else if (expiresAtMs && nowMs >= expiresAtMs) {
-        status = "EXPIRED";
+      if (status !== "SETTLED") {
+        if (expiresAtMs && nowMs >= expiresAtMs) {
+          status = "EXPIRED";
+        }
       }
       return { ...r, status };
     });
@@ -350,10 +349,11 @@ app.get(["/api/rounds/:id", "/rounds/:id"], async (req, res) => {
           description: onChain.description,
           pool_wei: onChain.pool_wei,
           remaining_pool_wei: onChain.remaining_pool_wei,
-          grant_amount_wei: onChain.grant_amount_per_claim_wei,
+          grant_amount_wei: onChain.reward_amount_per_recipient_wei || onChain.grant_amount_per_claim_wei,
           bond_amount_wei: onChain.required_bond_wei,
           finality_window_seconds: onChain.finality_window_seconds,
           duration_seconds: onChain.duration_seconds,
+          reward_recipients_count: onChain.reward_recipients_count || onChain.max_winners || 1,
           expires_at: onChain.expires_at ? new Date(Number(onChain.expires_at) * 1000).toISOString() : null,
           status: onChain.status,
         };
@@ -366,13 +366,11 @@ app.get(["/api/rounds/:id", "/rounds/:id"], async (req, res) => {
 
     // Dynamic status evaluation
     const nowMs = Date.now();
-    const remaining = BigInt(round.remaining_pool_wei || "0");
-    const grantAmt = BigInt(round.grant_amount_wei || "0");
     const expiresAtMs = round.expires_at ? new Date(round.expires_at).getTime() : null;
-    if (remaining < grantAmt) {
-      round.status = "EXHAUSTED";
-    } else if (expiresAtMs && nowMs >= expiresAtMs) {
-      round.status = "EXPIRED";
+    if (round.status !== "SETTLED") {
+      if (expiresAtMs && nowMs >= expiresAtMs) {
+        round.status = "EXPIRED";
+      }
     }
 
     // Fetch claims for this round
@@ -387,6 +385,54 @@ app.get(["/api/rounds/:id", "/rounds/:id"], async (req, res) => {
   }
 });
 
+app.post(["/api/rounds/:id/finalize", "/rounds/:id/finalize"], optionalAuth, async (req, res) => {
+  try {
+    const roundId = req.params.id;
+    console.log(`[Round Finalize] Finalizing rewards for round ${roundId}`);
+
+    const { txHash, round, claims } = await finalizeRoundAbstracted(roundId);
+
+    // Update round in DB
+    await sql`
+      UPDATE rounds
+      SET
+        status = 'SETTLED',
+        remaining_pool_wei = ${round?.remaining_pool_wei || "0"}
+      WHERE round_id = ${roundId};
+    `;
+
+    // Sync updated claims in DB
+    if (Array.isArray(claims)) {
+      for (const c of claims) {
+        await sql`
+          UPDATE claims
+          SET
+            status = ${c.status || "SETTLED"},
+            verdict = ${c.verdict || "APPROVED"},
+            rank = ${Number(c.rank || 0)},
+            reward_payout_wei = ${c.reward_payout_wei || "0"},
+            settled_at = NOW()
+          WHERE claim_id = ${c.claim_id};
+        `;
+      }
+    }
+
+    await sql`
+      INSERT INTO audit_logs (action, actor, details)
+      VALUES (
+        'ROUND_FINALIZED',
+        ${req.user?.email || "relayer"},
+        ${JSON.stringify({ roundId, txHash })}
+      );
+    `;
+
+    res.json({ success: true, txHash, round, claims });
+  } catch (err) {
+    console.error("[Round Finalize Error]:", err);
+    res.status(500).json({ error: err.message || "Failed to finalize round payouts" });
+  }
+});
+
 app.post(["/api/rounds", "/rounds"], optionalAuth, async (req, res) => {
   try {
     const {
@@ -398,6 +444,7 @@ app.post(["/api/rounds", "/rounds"], optionalAuth, async (req, res) => {
       poolDepositWei,
       finalitySeconds = 3600,
       durationSeconds = 604800,
+      rewardRecipientsCount = 1,
     } = req.body;
 
     if (!roundId || !title || !grantAmountWei || !bondAmountWei || !poolDepositWei) {
@@ -405,6 +452,7 @@ app.post(["/api/rounds", "/rounds"], optionalAuth, async (req, res) => {
     }
 
     const durationSec = Number(durationSeconds) || 604800;
+    const recipientsCount = Math.max(1, Number(rewardRecipientsCount) || 1);
     const expiresAt = new Date(Date.now() + durationSec * 1000);
 
     // Submit abstracted transaction on GenLayer
@@ -417,6 +465,7 @@ app.post(["/api/rounds", "/rounds"], optionalAuth, async (req, res) => {
       poolDepositWei,
       finalitySeconds,
       durationSeconds: durationSec,
+      rewardRecipientsCount: recipientsCount,
     });
 
     // Record in Neon DB
@@ -424,7 +473,7 @@ app.post(["/api/rounds", "/rounds"], optionalAuth, async (req, res) => {
       INSERT INTO rounds (
         round_id, creator, title, description,
         pool_wei, remaining_pool_wei, grant_amount_wei, bond_amount_wei,
-        finality_window_seconds, duration_seconds, expires_at, status, tx_hash
+        finality_window_seconds, duration_seconds, reward_recipients_count, expires_at, status, tx_hash
       ) VALUES (
         ${roundId},
         ${round?.creator || getDeployerAddress()},
@@ -436,6 +485,7 @@ app.post(["/api/rounds", "/rounds"], optionalAuth, async (req, res) => {
         ${String(bondAmountWei)},
         ${Number(finalitySeconds)},
         ${durationSec},
+        ${recipientsCount},
         ${expiresAt},
         'OPEN',
         ${txHash}
@@ -444,6 +494,7 @@ app.post(["/api/rounds", "/rounds"], optionalAuth, async (req, res) => {
         remaining_pool_wei = EXCLUDED.remaining_pool_wei,
         pool_wei = EXCLUDED.pool_wei,
         duration_seconds = EXCLUDED.duration_seconds,
+        reward_recipients_count = EXCLUDED.reward_recipients_count,
         expires_at = EXCLUDED.expires_at,
         tx_hash = EXCLUDED.tx_hash;
     `;
@@ -541,17 +592,12 @@ app.post(["/api/claims/submit", "/claims/submit"], optionalAuth, async (req, res
 
     console.log(`[Claim Submit] Processing claim ${claimId} by ${email}`);
 
-    // Pre-flight check: verify round status, expiry, and pool exhaustion before submitting
+    // Pre-flight check: verify round expiry before submitting
     const roundCheck = await sql`SELECT * FROM rounds WHERE round_id = ${roundId} LIMIT 1`;
     if (roundCheck.length) {
       const r = roundCheck[0];
-      const remaining = BigInt(r.remaining_pool_wei || "0");
-      const grantAmt = BigInt(r.grant_amount_wei || "0");
       const expiresAtMs = r.expires_at ? new Date(r.expires_at).getTime() : null;
 
-      if (remaining < grantAmt) {
-        return res.status(400).json({ error: "Grant round pool is exhausted; no further applications accepted" });
-      }
       if (expiresAtMs && Date.now() >= expiresAtMs) {
         return res.status(400).json({ error: "Grant round timeline has elapsed; applications are closed" });
       }
@@ -578,7 +624,8 @@ app.post(["/api/claims/submit", "/claims/submit"], optionalAuth, async (req, res
         pr_url, activity_url, screenshot_url, notes,
         bond_wei, grant_wei,
         tier1_pr_merged, tier2_sybil_score, tier2_sybil_tier,
-        fraud_detected, verdict, verdict_reasoning,
+        fraud_detected, strength_score, strength_assessment,
+        rank, reward_payout_wei, verdict, verdict_reasoning,
         status, finality_expires_at, tx_hash
       ) VALUES (
         ${claimId},
@@ -595,6 +642,10 @@ app.post(["/api/claims/submit", "/claims/submit"], optionalAuth, async (req, res
         ${Number(claim.tier2_sybil_score || 0)},
         ${claim.tier2_sybil_tier || "ORGANIC"},
         ${Boolean(claim.fraud_detected)},
+        ${Number(claim.strength_score || 0)},
+        ${claim.strength_assessment || ""},
+        ${Number(claim.rank || 0)},
+        ${claim.reward_payout_wei || "0"},
         ${claim.verdict || "ADJUDICATED"},
         ${claim.verdict_reasoning || ""},
         'ADJUDICATED',
@@ -606,6 +657,10 @@ app.post(["/api/claims/submit", "/claims/submit"], optionalAuth, async (req, res
         tier2_sybil_score = EXCLUDED.tier2_sybil_score,
         tier2_sybil_tier = EXCLUDED.tier2_sybil_tier,
         fraud_detected = EXCLUDED.fraud_detected,
+        strength_score = EXCLUDED.strength_score,
+        strength_assessment = EXCLUDED.strength_assessment,
+        rank = EXCLUDED.rank,
+        reward_payout_wei = EXCLUDED.reward_payout_wei,
         verdict = EXCLUDED.verdict,
         verdict_reasoning = EXCLUDED.verdict_reasoning,
         status = EXCLUDED.status,

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useThemis } from "../context/ThemisContext";
 import {
   X,
@@ -23,16 +23,22 @@ export function ClaimSubmissionModal({ isOpen, onClose }) {
   const [notes, setNotes] = useState("Implemented core protocol optimizations and passed regression tests.");
   const [error, setError] = useState(null);
 
+  useEffect(() => {
+    if (selectedRound?.round_id) {
+      setRoundId(selectedRound.round_id);
+    } else if (rounds.length > 0 && !roundId) {
+      setRoundId(rounds[0].round_id);
+    }
+  }, [selectedRound, isOpen, rounds]);
+
   if (!isOpen) return null;
 
   const currentRound = rounds.find((r) => r.round_id === roundId) || selectedRound || rounds[0];
-  const isExhausted =
-    currentRound?.status === "EXHAUSTED" ||
-    BigInt(currentRound?.remaining_pool_wei || "0") < BigInt(currentRound?.grant_amount_wei || "0");
+  const isSettled = currentRound?.status === "SETTLED";
   const isExpired =
     currentRound?.status === "EXPIRED" ||
     (currentRound?.expires_at && new Date(currentRound.expires_at).getTime() <= Date.now());
-  const isClosed = isExhausted || isExpired;
+  const isClosed = isSettled || isExpired;
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -40,8 +46,8 @@ export function ClaimSubmissionModal({ isOpen, onClose }) {
 
     if (isClosed) {
       setError(
-        isExhausted
-          ? "This grant round pool is exhausted. No further claims can be submitted."
+        isSettled
+          ? "This grant round has already been settled and finalized."
           : "This grant round timeline has elapsed. Applications are closed."
       );
       return;
@@ -121,8 +127,8 @@ export function ClaimSubmissionModal({ isOpen, onClose }) {
             <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 shrink-0" />
               <span>
-                {isExhausted
-                  ? "This grant round pool is exhausted. No further claims can be submitted."
+                {isSettled
+                  ? "This grant round has already been settled and finalized."
                   : "This grant round timeline has elapsed. Applications are closed."}
               </span>
             </div>

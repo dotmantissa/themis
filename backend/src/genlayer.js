@@ -245,6 +245,7 @@ export async function createRoundAbstracted({
   poolDepositWei,
   finalitySeconds = 3600,
   durationSeconds = 604800,
+  rewardRecipientsCount = 1,
 }) {
   console.log(`[Themis Relayer] Submitting abstracted round creation ${roundId}...`);
 
@@ -259,6 +260,7 @@ export async function createRoundAbstracted({
       BigInt(bondAmountWei),
       Number(finalitySeconds),
       Number(durationSeconds),
+      Number(rewardRecipientsCount),
     ],
     value: BigInt(poolDepositWei),
   });
@@ -275,6 +277,35 @@ export async function createRoundAbstracted({
   return {
     txHash: receipt.hash,
     round: createdRound,
+  };
+}
+
+/**
+ * Abstracted Round Payouts Finalization
+ */
+export async function finalizeRoundAbstracted(roundId) {
+  console.log(`[Themis Relayer] Finalizing round payouts for ${roundId}...`);
+
+  const txHash = await glClient.writeContract({
+    address: contractAddress,
+    functionName: "finalize_round_payouts",
+    args: [String(roundId).trim()],
+  });
+
+  const receipt = await glClient.waitForTransactionReceipt({
+    hash: txHash,
+    status: "ACCEPTED",
+    interval: 3000,
+    retries: 120,
+    fullTransaction: true,
+  });
+
+  const finalizedRound = await readRoundOnChain(roundId);
+  const updatedClaims = await readClaimsByRoundOnChain(roundId);
+  return {
+    txHash: receipt.hash,
+    round: finalizedRound,
+    claims: updatedClaims,
   };
 }
 

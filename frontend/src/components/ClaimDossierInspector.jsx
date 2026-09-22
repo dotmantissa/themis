@@ -16,6 +16,8 @@ import {
   XCircle,
   Activity,
   Image as ImageIcon,
+  Trophy,
+  Sparkles,
 } from "lucide-react";
 
 export function ClaimDossierInspector({ claim, onAppealClick }) {
@@ -57,6 +59,7 @@ export function ClaimDossierInspector({ claim, onAppealClick }) {
   };
 
   const isApproved = claim.verdict === "APPROVED";
+  const isRunnerUp = claim.verdict === "HONEST_RUNNER_UP";
   const isFraud = claim.verdict === "REJECTED_SYBIL_FRAUD";
   const isSettled = claim.status === "SETTLED" || claim.status === "SLASHED" || claim.status === "REFUNDED";
   const isAppealed = claim.is_appealed || claim.status === "APPEALED";
@@ -83,8 +86,14 @@ export function ClaimDossierInspector({ claim, onAppealClick }) {
         <div className="flex items-center gap-2">
           {isApproved && (
             <span className="px-3 py-1 rounded-xl bg-[#d4f717]/20 text-[#d4f717] border border-[#d4f717]/40 text-xs font-mono font-bold flex items-center gap-1.5">
+              <Trophy className="w-3.5 h-3.5" />
+              WINNER {claim.rank ? `(#${claim.rank})` : ""}
+            </span>
+          )}
+          {isRunnerUp && (
+            <span className="px-3 py-1 rounded-xl bg-blue-500/20 text-blue-300 border border-blue-500/40 text-xs font-mono font-bold flex items-center gap-1.5">
               <ShieldCheck className="w-3.5 h-3.5" />
-              VERDICT APPROVED
+              HONEST RUNNER-UP {claim.rank ? `(#${claim.rank})` : ""}
             </span>
           )}
           {isFraud && (
@@ -93,10 +102,10 @@ export function ClaimDossierInspector({ claim, onAppealClick }) {
               REJECTED FRAUD
             </span>
           )}
-          {!isApproved && !isFraud && (
+          {!isApproved && !isRunnerUp && !isFraud && (
             <span className="px-3 py-1 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-500/40 text-xs font-mono font-bold flex items-center gap-1.5">
               <AlertOctagon className="w-3.5 h-3.5" />
-              REJECTED UNMERGED
+              ADJUDICATED
             </span>
           )}
         </div>
@@ -225,6 +234,51 @@ export function ClaimDossierInspector({ claim, onAppealClick }) {
           )}
         </div>
 
+        {/* Idea Strength & Execution Quality Card */}
+        <div className="p-4 rounded-xl bg-[#24244f]/80 border border-[#3b3b6d]/60 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="p-1.5 rounded-lg bg-[#d4f717]/20 border border-[#d4f717]/40">
+                <Sparkles className="w-4 h-4 text-[#d4f717]" />
+              </div>
+              <div>
+                <p className="text-xs font-bold text-white">Idea & Execution Strength</p>
+                <p className="text-[11px] text-[#a3a3cf]">
+                  Validators evaluate technical complexity, utility, and execution polish
+                </p>
+              </div>
+            </div>
+
+            <div className="text-right">
+              <span className="text-xs font-mono font-bold px-2.5 py-0.5 rounded-full bg-[#d4f717]/20 text-[#d4f717] border border-[#d4f717]/30">
+                Strength: {claim.strength_score ?? 0}/100
+              </span>
+            </div>
+          </div>
+
+          <div className="w-full bg-[#181836] rounded-full h-2 overflow-hidden border border-[#3b3b6d]/40">
+            <div
+              className="bg-gradient-to-r from-[#5a38fd] to-[#d4f717] h-full rounded-full transition-all duration-500"
+              style={{ width: `${Math.min(100, Math.max(0, claim.strength_score ?? 0))}%` }}
+            />
+          </div>
+
+          {claim.strength_assessment && (
+            <p className="text-xs text-[#a3a3cf] leading-relaxed italic bg-[#181836]/60 p-2.5 rounded-lg border border-[#3b3b6d]/40">
+              "{claim.strength_assessment}"
+            </p>
+          )}
+
+          {Number(claim.rank) > 0 && (
+            <div className="flex items-center gap-2 pt-1 text-xs font-mono">
+              <span className="text-[#a3a3cf]">Round Allocation Standing:</span>
+              <span className="px-2 py-0.5 rounded bg-[#5a38fd]/30 text-[#d4f717] font-bold border border-[#5a38fd]/50">
+                Rank #{claim.rank}
+              </span>
+            </div>
+          )}
+        </div>
+
         {/* Validator Consensus Reasoning Box */}
         {claim.verdict_reasoning && (
           <div className="p-3.5 rounded-xl bg-[#181836]/90 border border-[#3b3b6d]/50 space-y-1">
@@ -257,6 +311,8 @@ export function ClaimDossierInspector({ claim, onAppealClick }) {
             <p className="text-sm font-mono font-bold text-white">
               {isApproved
                 ? `${formatGen(BigInt(claim.grant_wei || "0") + BigInt(claim.bond_wei || "0"))} GEN`
+                : isRunnerUp
+                ? `${formatGen(claim.bond_wei)} GEN (Refund)`
                 : isFraud
                 ? "0 GEN"
                 : `${formatGen(claim.bond_wei)} GEN (Refund)`}
