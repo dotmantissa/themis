@@ -1,0 +1,6 @@
+contract_path: contracts/
+
+networks:
+  localnet:
+  studionet:
+    rpc: "https://studio.genlayer.com/api"
