@@ -1,6 +1,9 @@
 import dns from "node:dns";
 dns.setDefaultResultOrder("ipv4first");
 
+import { Agent, setGlobalDispatcher, interceptors } from "undici";
+setGlobalDispatcher(new Agent({ connect: { family: 4 } }).compose(interceptors.decompress()));
+
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";

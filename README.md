@@ -17,13 +17,14 @@ Themis is deployed and live on Vercel:
 ### On-Chain Contract on GenLayer
 Themis Intelligent Contract is live on the GenLayer Studio Network:
 
-- **Intelligent Contract Address**: `0x016A4143cACEc8Ce4Ac0DD241260D5426C0eeE39`
+- **Intelligent Contract Address**: `0xF09CA43446e0F7f5037883BD1D4522e515313A16`
 - **Deployer / Relayer Address**: `0xBC1399c55538eC034d4Da550C03c34Ae0C357f53`
 - **Network**: GenLayer Studio (`studionet`)
 - **Chain ID**: `61999`
 - **RPC URL**: `https://studio.genlayer.com/api`
-- **Deployment Transaction**: `0x6d8ef2fdbd219af2cb274111291566aa7c3de45106ddc11471cf1af0b2757800`
-- **Genesis Round**: `themis-genesis-grant` ("Autonomous AI and Protocol Tooling Grant Round" funded with real GEN)
+- **Deployment Transaction**: `0x9f70d9002ccb09844cd5cc383c8d543f163f8670f7e6577d6f3fbdbb175bdf71`
+- **Genesis Round Transaction**: `0x4e5dd5fa5fd8b4e70b79625c2fa5d0d81de80ba040f9abdd5d30f63e46af9cd2`
+- **Genesis Round**: `themis-genesis-grant` ("Autonomous AI and Protocol Tooling Grant Round" bound to `dotmantissa/themis` and funded with real GEN)
 
 ---
 
@@ -46,25 +47,47 @@ Tier 2 sybil detection requires subjective forensic appraisal. Rather than letti
 ### 5. Custom Equivalence Execution (`gl.vm.run_nondet_unsafe`)
 To ensure total separation between non-deterministic data gathering and state updates, the contract executes leader and validator functions inside `gl.vm.run_nondet_unsafe`. Leaders extract forensic evidence and compute risk scores; validators independently execute verification without trusting leader state.
 
-### 6. Native GEN Ghost Custody (`emit_transfer`)
-Themis does not hold funds in wrapped third-party tokens or insecure multi-sigs. Round pools and claimant bonds are stored natively in the EVM ghost custody contract. Upon final settlement, the contract triggers `emit_transfer` to disburse funds to honest claimants or slash forfeited bonds directly to `dispute_bounty_pool_wei`.
+### 6. Native GEN Ghost Custody & User-Bound Routing (`emit_transfer`)
+Themis does not hold funds in wrapped third-party tokens or insecure multi-sigs. Round pools and claimant bonds are stored natively in the EVM ghost custody contract. Upon settlement, the contract executes `emit_transfer` directly to the builder's verified address (`claimant_address`). The relayer never holds custody of claimant rewards or bond refunds.
 
-### 7. Native Consensus Dispute Window (Appeal Timelock)
-Decentralized justice requires time for human arbitration. Every adjudication enters an appeal window (`finality_window_seconds`). Anyone can register a dispute, which transitions the claim into `APPEALED` status and freezes payouts until community governors resolve the objection.
+### 7. Native Consensus Dispute Window & Settlement Protection
+Decentralized justice requires time for human arbitration. Every adjudication enters an appeal window (`finality_window_seconds`). The contract strictly prevents appealed or non-final claims from being settled. Any active appeal freezes payouts; attempting to settle or finalize payouts before the dispute timelock elapses reverts immediately on-chain.
 
 ### 8. Mixed Deterministic and Non-Deterministic Logic
-Themis brings together the best of both worlds. Financial bookkeeping (depositing pools, calculating balances, tracking bonds, enforcing timelocks) is strictly deterministic and auditable. AI powered verification (pulling git evidence, inspecting DOM graphs, scoring fraud risk) runs non-deterministically through GenLayer consensus within the same unified Python contract.
+Themis brings together the best of both worlds. Financial bookkeeping (depositing pools, calculating balances, tracking bonds, enforcing timelocks, single-use evidence registry) is strictly deterministic and auditable. AI powered verification (pulling git evidence, inspecting DOM graphs, scoring fraud risk, author matching) runs non-deterministically through GenLayer consensus within the same unified Python contract.
 
-### 9. Web3 Frontend with `genlayer-js` and Viem
-The user interface is powered by `genlayer-js` on top of `viem`, connecting to GenLayer Studio Chain 61999. Contributor actions feature transaction abstraction: contributors sign in with their email via Privy, while backend relayers sponsor transactions so builders never get stuck on faucet barriers.
+### 9. Web3 Frontend with User-Bound Transaction Abstraction
+The user interface is powered by `genlayer-js` on top of `viem`, connecting to GenLayer Studio Chain 61999. Contributor actions feature transaction abstraction: contributors sign in with their email via Privy, while backend relayers sponsor transaction gas. Importantly, the builder's own custody address is recorded as the claimant on-chain, keeping the relayer purely non-custodial. All embedded signer keys have been removed from the repository in favor of standard runtime environment variables.
 
-### 10. Automated Test Suite with Revert Verification
+### 10. Automated Test Suite with Revert Verification (18 Pytest + 10 Node Integration Tests)
 The full test suite (`tests/test_themis_escrow.py` and `tests/test_backend_api.mjs`) provides 100% verification across all protocol states. Crucially, tests verify forced consensus failure paths:
+- User-bound custody: payouts and bond refunds transfer directly to claimant address, not relayer
+- Single-use evidence registry: replaying identical pull request evidence reverts immediately
+- Grant repository binding: PRs from unauthorized repositories revert on-chain
+- Verified contribution provenance: author mismatches between PR author and claimed builder are flagged and rejected
+- Appeal settlement blocking: claims with active appeals strictly revert settlement attempts
+- Non-final settlement blocking: claims whose dispute window has not expired strictly revert settlement attempts
 - Rejection of claims with insufficient bond deposits
 - Rejection of claims against nonexistent round identifiers
-- Settlement blocking prior to finality window expiration
-- Rejection of duplicate claim submissions
 - Automatic bond slashing upon consensus sybil fraud detection
+
+---
+
+## Security & Protocol Integrity Guarantees
+
+Themis enforces four non-negotiable security boundaries on GenLayer:
+
+1. **User-Bound Custody**:
+   Every claim submission requires a valid builder wallet address (`claimant_address`). When `settle_claim` or `finalize_round_payouts` executes, `self._transfer_funds` invokes `emit_transfer` directly to `claimant_address`. Even though the backend relayer sponsors transaction gas and deposits the bond on the builder's behalf, the relayer has zero custody or redirection capability.
+
+2. **Verified Contribution Provenance & Repository Binding**:
+   Grant rounds are created with a designated target repository (`target_repo`). During claim submission, validators verify that the pull request originates strictly from `target_repo`. Furthermore, Tier 1 consensus extracts the git commit author and verifies it against the builder's claimed GitHub handle (`builder_github`). Mismatches result in rejection and prevent unearned grant capture.
+
+3. **Single-Use Evidence Registry**:
+   To prevent replay attacks where a single merged PR is reused across multiple rounds or by multiple accounts, Themis maintains an on-chain `used_evidence` registry. PR URLs are normalized into a canonical format (`github:owner/repo#pr-num`). Any attempt to reuse registered evidence reverts on-chain.
+
+4. **Settlement Timelock & Dispute Protection**:
+   Claims cannot be finalized or settled while in `APPEALED` status or before `now >= finality_expires_at`. Both `settle_claim` and `finalize_round_payouts` enforce strict on-chain require statements that revert if any claim is unfinalized or under active dispute.
 
 ---
 

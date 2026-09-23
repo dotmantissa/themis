@@ -68,6 +68,7 @@ export async function initDb() {
   await sql`ALTER TABLE rounds ADD COLUMN IF NOT EXISTS duration_seconds INTEGER DEFAULT 604800;`;
   await sql`ALTER TABLE rounds ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP WITH TIME ZONE;`;
   await sql`ALTER TABLE rounds ADD COLUMN IF NOT EXISTS reward_recipients_count INTEGER DEFAULT 1;`;
+  await sql`ALTER TABLE rounds ADD COLUMN IF NOT EXISTS target_repo TEXT;`;
 
   // Claims table (mirrors on-chain two-tier verdicts and evidence)
   await sql`
@@ -103,6 +104,11 @@ export async function initDb() {
   await sql`ALTER TABLE claims ADD COLUMN IF NOT EXISTS strength_assessment TEXT;`;
   await sql`ALTER TABLE claims ADD COLUMN IF NOT EXISTS rank INTEGER DEFAULT 0;`;
   await sql`ALTER TABLE claims ADD COLUMN IF NOT EXISTS reward_payout_wei VARCHAR(100) DEFAULT '0';`;
+  await sql`ALTER TABLE claims ADD COLUMN IF NOT EXISTS canonical_evidence TEXT;`;
+  await sql`ALTER TABLE claims ADD COLUMN IF NOT EXISTS target_repo TEXT;`;
+  await sql`ALTER TABLE claims ADD COLUMN IF NOT EXISTS builder_github VARCHAR(100);`;
+  await sql`ALTER TABLE claims ADD COLUMN IF NOT EXISTS author_matched BOOLEAN DEFAULT TRUE;`;
+  await sql`ALTER TABLE claims ADD COLUMN IF NOT EXISTS pr_author VARCHAR(100);`;
 
   // Appeals table
   await sql`

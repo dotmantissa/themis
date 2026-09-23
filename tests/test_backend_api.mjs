@@ -81,6 +81,51 @@ async function testBackend() {
   assert.strictEqual(userData.user.email, syncEmail);
   console.log("   User profile verified.");
 
+  // 8. Evidence deduplication check
+  console.log("8. GET /api/claims/check-evidence");
+  const evRes = await fetch(`${BASE_URL}/api/claims/check-evidence?prUrl=https://github.com/dotmantissa/themis/pull/1`);
+  assert.strictEqual(evRes.status, 200);
+  const evData = await evRes.json();
+  assert.ok(typeof evData.is_used === "boolean", "Evidence status should have boolean is_used");
+  console.log("   Evidence deduplication check verified. is_used:", evData.is_used);
+
+  // 9. User-Bound Custody validation in claim submission
+  console.log("9. POST /api/claims/submit (Missing builder custody address should be rejected)");
+  const submitMissingCustodyRes = await fetch(`${BASE_URL}/api/claims/submit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      claimId: `claim-test-${Date.now()}`,
+      roundId: "themis-genesis-grant",
+      prUrl: "https://github.com/dotmantissa/themis/pull/999",
+      activityUrl: "https://github.com/dotmantissa/themis/commits",
+      // intentionally omit claimantAddress / walletAddress
+    }),
+  });
+  assert.strictEqual(submitMissingCustodyRes.status, 400, "Should reject submission without builder custody wallet");
+  const missingCustodyData = await submitMissingCustodyRes.json();
+  assert.ok(missingCustodyData.error.includes("custody") || missingCustodyData.error.includes("claimantAddress"), "Error should mention custody or claimantAddress");
+  console.log("   User-bound custody rejection verified:", missingCustodyData.error);
+
+  // 10. Repository Provenance validation in claim submission
+  console.log("10. POST /api/claims/submit (Repository mismatch should be rejected)");
+  const submitRepoMismatchRes = await fetch(`${BASE_URL}/api/claims/submit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      claimId: `claim-test-mismatch-${Date.now()}`,
+      roundId: "themis-genesis-grant",
+      prUrl: "https://github.com/unrelated-org/unrelated-repo/pull/1",
+      activityUrl: "https://github.com/unrelated-org/unrelated-repo",
+      claimantAddress: "0x111122223333444455556666777788889999aaaa",
+      builderGithub: "unrelated-builder",
+    }),
+  });
+  assert.strictEqual(submitRepoMismatchRes.status, 400, "Should reject PR from mismatched repository");
+  const repoMismatchData = await submitRepoMismatchRes.json();
+  assert.ok(repoMismatchData.error.includes("repository"), "Error should identify repository mismatch");
+  console.log("   Repository provenance mismatch rejection verified:", repoMismatchData.error);
+
   console.log("=========================================");
   console.log("All Backend API Integration Tests Passed!");
   console.log("=========================================");

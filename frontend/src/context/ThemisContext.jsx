@@ -168,8 +168,17 @@ export function ThemisProvider({ children }) {
     }
   };
 
-  // Submit grant claim (Abstracted transaction via backend relayer)
-  const submitClaim = async ({ claimId, roundId, prUrl, activityUrl, screenshotUrl, notes }) => {
+  // Submit grant claim (Abstracted transaction via backend relayer with user-bound custody)
+  const submitClaim = async ({
+    claimId,
+    roundId,
+    prUrl,
+    activityUrl,
+    claimantAddress,
+    builderGithub,
+    screenshotUrl,
+    notes,
+  }) => {
     setSubmitting(true);
     setFeedbackMessage(null);
     try {
@@ -179,6 +188,11 @@ export function ThemisProvider({ children }) {
         token = await getAccessToken();
       } catch {
         // Fallback
+      }
+
+      const targetAddress = claimantAddress || userWalletAddress || user?.wallet?.address;
+      if (!targetAddress) {
+        throw new Error("A valid wallet address is required to ensure user-bound custody.");
       }
 
       const res = await fetch("/api/claims/submit", {
@@ -193,6 +207,8 @@ export function ThemisProvider({ children }) {
           roundId,
           prUrl,
           activityUrl,
+          claimantAddress: targetAddress,
+          builderGithub: builderGithub || "",
           screenshotUrl: screenshotUrl || "",
           notes: notes || "",
           claimantEmail: email,
@@ -326,7 +342,7 @@ export function ThemisProvider({ children }) {
     }
   };
 
-  // Create new grant round
+  // Create new grant round with target grant repository
   const createRound = async ({
     roundId,
     title,
@@ -337,6 +353,7 @@ export function ThemisProvider({ children }) {
     finalitySeconds,
     durationSeconds,
     rewardRecipientsCount = 1,
+    targetRepo = "",
   }) => {
     setSubmitting(true);
     setFeedbackMessage(null);
@@ -361,6 +378,7 @@ export function ThemisProvider({ children }) {
           finalitySeconds: finalitySeconds || 3600,
           durationSeconds: durationSeconds || 604800,
           rewardRecipientsCount: Number(rewardRecipientsCount) || 1,
+          targetRepo: targetRepo.trim(),
         }),
       });
 
@@ -372,7 +390,7 @@ export function ThemisProvider({ children }) {
       setFeedbackMessage({
         type: "success",
         title: "Grant Round Funded",
-        message: `Round ${roundId} created with ${rewardRecipientsCount} reward slot(s) and funded with ${poolDepositGen} GEN.`,
+        message: `Round ${roundId} created with ${rewardRecipientsCount} reward slot(s) and bound to ${targetRepo || "open repo"}.`,
       });
 
       await refreshData();
@@ -389,6 +407,19 @@ export function ThemisProvider({ children }) {
       throw err;
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  // Pre-flight check for evidence deduplication
+  const checkEvidence = async (prUrl) => {
+    try {
+      const res = await fetch(`/api/claims/check-evidence?prUrl=${encodeURIComponent(prUrl)}`);
+      if (res.ok) {
+        return await res.json();
+      }
+      return { is_used: false };
+    } catch {
+      return { is_used: false };
     }
   };
 
@@ -450,6 +481,7 @@ export function ThemisProvider({ children }) {
         appealClaim,
         createRound,
         finalizeRound,
+        checkEvidence,
         user,
         authenticated,
         login,

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useThemis } from "../context/ThemisContext";
 import {
   ShieldCheck,
@@ -18,11 +18,23 @@ import {
   Image as ImageIcon,
   Trophy,
   Sparkles,
+  UserCheck,
+  Lock,
+  Unlock,
+  AlertTriangle,
 } from "lucide-react";
 
 export function ClaimDossierInspector({ claim, onAppealClick }) {
   const { settleClaim, submitting } = useThemis();
   const [settling, setSettling] = useState(false);
+  const [nowTs, setNowTs] = useState(() => Math.floor(Date.now() / 1000));
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNowTs(Math.floor(Date.now() / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   if (!claim) {
     return (
@@ -63,6 +75,20 @@ export function ClaimDossierInspector({ claim, onAppealClick }) {
   const isFraud = claim.verdict === "REJECTED_SYBIL_FRAUD";
   const isSettled = claim.status === "SETTLED" || claim.status === "SLASHED" || claim.status === "REFUNDED";
   const isAppealed = claim.is_appealed || claim.status === "APPEALED";
+
+  const finalityExpiresAt = claim.finality_expires_at
+    ? typeof claim.finality_expires_at === "number"
+      ? claim.finality_expires_at
+      : Math.floor(new Date(claim.finality_expires_at).getTime() / 1000)
+    : 0;
+  const secondsRemaining = Math.max(0, finalityExpiresAt - nowTs);
+  const isFinal = secondsRemaining === 0;
+
+  const formatCountdown = (secs) => {
+    const mins = Math.floor(secs / 60);
+    const remSecs = secs % 60;
+    return `${mins}m ${remSecs < 10 ? "0" : ""}${remSecs}s`;
+  };
 
   return (
     <div className="rounded-2xl border border-[#3b3b6d]/60 bg-gradient-to-br from-[#1d1d42] to-[#181836] p-6 space-y-6 shadow-xl">
@@ -107,6 +133,62 @@ export function ClaimDossierInspector({ claim, onAppealClick }) {
               <AlertOctagon className="w-3.5 h-3.5" />
               ADJUDICATED
             </span>
+          )}
+        </div>
+      </div>
+
+      {/* User-Bound Custody & Verified Provenance Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {/* User-Bound Custody Card */}
+        <div className="p-3.5 rounded-xl bg-[#24244f]/80 border border-[#3b3b6d]/60 space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-mono font-bold text-white flex items-center gap-1.5">
+              <UserCheck className="w-3.5 h-3.5 text-[#d4f717]" />
+              User-Bound Custody
+            </span>
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#d4f717]/10 text-[#d4f717] border border-[#d4f717]/30 font-semibold">
+              DIRECT PAYOUT
+            </span>
+          </div>
+          <p className="text-[11px] text-[#a3a3cf] font-mono truncate">
+            Builder Wallet: <span className="text-white font-bold">{claim.claimant || claim.claimant_address || "0x..."}</span>
+          </p>
+          <p className="text-[10px] text-[#a3a3cf]">
+            Smart contract routes 100% of payout directly to the builder. Relayer holds zero custody.
+          </p>
+        </div>
+
+        {/* Verified Contribution Provenance Card */}
+        <div className="p-3.5 rounded-xl bg-[#24244f]/80 border border-[#3b3b6d]/60 space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-mono font-bold text-white flex items-center gap-1.5">
+              <ShieldCheck className="w-3.5 h-3.5 text-[#5a38fd]" />
+              Contribution Provenance
+            </span>
+            {claim.author_matched === false ? (
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 font-bold">
+                AUTHOR MISMATCH
+              </span>
+            ) : (
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold">
+                VERIFIED PROVENANCE
+              </span>
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+            <div>
+              <span className="text-[#a3a3cf]">Target Repo: </span>
+              <span className="text-white">{claim.target_repo || "dotmantissa/themis"}</span>
+            </div>
+            <div>
+              <span className="text-[#a3a3cf]">PR Author: </span>
+              <span className="text-[#d4f717]">{claim.pr_author || claim.builder_github || "verified"}</span>
+            </div>
+          </div>
+          {claim.canonical_evidence && (
+            <p className="text-[10px] text-[#a3a3cf] font-mono truncate">
+              Single-Use Proof: <span className="text-[#d4f717]">{claim.canonical_evidence}</span>
+            </p>
           )}
         </div>
       </div>
@@ -327,28 +409,63 @@ export function ClaimDossierInspector({ claim, onAppealClick }) {
           </div>
         </div>
 
-        {/* Native Protocol Finality Notice */}
-        <div className="p-3 rounded-xl bg-[#5a38fd]/10 border border-[#5a38fd]/30 flex items-start gap-2.5">
-          <Clock className="w-4 h-4 text-[#d4f717] shrink-0 mt-0.5" />
-          <div className="text-xs text-[#a3a3cf] leading-relaxed">
-            <strong className="text-white">Native Consensus Dispute Window:</strong> GenLayer protocol guarantees an appeal window before state finalization. Settlement releases funds only after this window elapses without dispute.
+        {/* Native Protocol Finality & Settlement Protection Notice */}
+        {isAppealed ? (
+          <div className="p-3.5 rounded-xl bg-rose-500/15 border border-rose-500/30 flex items-start gap-2.5">
+            <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <div className="text-xs text-rose-200 leading-relaxed">
+              <strong className="text-rose-100 font-bold">Settlement Frozen (Active Appeal): </strong> 
+              This claim is under active consensus appeal. Escrow releases and bond disbursements are strictly locked by the GenLayer smart contract until the appeal is adjudicated.
+            </div>
           </div>
-        </div>
+        ) : !isFinal ? (
+          <div className="p-3.5 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-start gap-2.5">
+            <Clock className="w-4 h-4 text-amber-300 shrink-0 mt-0.5" />
+            <div className="text-xs text-amber-200 leading-relaxed">
+              <strong className="text-amber-100 font-bold">Appeal Window Active ({formatCountdown(secondsRemaining)} remaining): </strong> 
+              GenLayer protocol enforces a mandatory dispute window before state finalization. Settlement is locked until this window expires to protect peer review and dispute rights.
+            </div>
+          </div>
+        ) : (
+          <div className="p-3.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-start gap-2.5">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+            <div className="text-xs text-emerald-200 leading-relaxed">
+              <strong className="text-emerald-100 font-bold">Protocol Finality Reached: </strong> 
+              Dispute window has elapsed with no active appeals. Claim is finalized and eligible for direct-to-claimant on-chain settlement.
+            </div>
+          </div>
+        )}
 
         {/* Action Controls */}
         <div className="flex flex-col sm:flex-row items-center gap-2.5 pt-2">
           {!isSettled && (
             <button
               onClick={handleSettle}
-              disabled={settling || submitting || isAppealed}
+              disabled={settling || submitting || isAppealed || !isFinal}
               className={`w-full sm:flex-1 py-2.5 px-4 rounded-xl font-bold text-xs shadow-md action-btn flex items-center justify-center gap-2 ${
                 isAppealed
-                  ? "bg-slate-600 text-slate-300 cursor-not-allowed"
+                  ? "bg-slate-700/60 text-slate-400 cursor-not-allowed border border-slate-600/50"
+                  : !isFinal
+                  ? "bg-amber-950/40 text-amber-300/80 cursor-not-allowed border border-amber-500/30"
                   : "bg-gradient-to-r from-[#d4f717] to-[#bfe010] text-[#24244f] hover:shadow-[#d4f717]/20"
               }`}
             >
-              <Gavel className="w-4 h-4" />
-              <span>{settling ? "Settling on-chain..." : "Settle Payout & Bond"}</span>
+              {isAppealed ? (
+                <>
+                  <Lock className="w-4 h-4 text-rose-400" />
+                  <span>Settlement Frozen (Active Appeal)</span>
+                </>
+              ) : !isFinal ? (
+                <>
+                  <Lock className="w-4 h-4 text-amber-400" />
+                  <span>Settlement Locked ({formatCountdown(secondsRemaining)})</span>
+                </>
+              ) : (
+                <>
+                  <Gavel className="w-4 h-4" />
+                  <span>{settling ? "Settling on-chain..." : "Settle Payout & Bond"}</span>
+                </>
+              )}
             </button>
           )}
 

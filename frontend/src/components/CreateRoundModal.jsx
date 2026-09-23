@@ -17,6 +17,7 @@ export function CreateRoundModal({ isOpen, onClose }) {
   const [roundId, setRoundId] = useState(() => `round-${Math.random().toString(36).substring(2, 7)}`);
   const [title, setTitle] = useState("Open Protocol Infrastructure Grant");
   const [description, setDescription] = useState("Empowering independent developers building decentralized tooling, client libraries, and consensus infrastructure.");
+  const [targetRepo, setTargetRepo] = useState("dotmantissa/themis");
   const [grantAmountGen, setGrantAmountGen] = useState("0.1");
   const [rewardRecipientsCount, setRewardRecipientsCount] = useState("3");
   const [bondAmountGen, setBondAmountGen] = useState("0.01");
@@ -78,6 +79,7 @@ export function CreateRoundModal({ isOpen, onClose }) {
         finalitySeconds,
         durationSeconds,
         rewardRecipientsCount: count,
+        targetRepo: targetRepo.trim(),
       });
       onClose();
     } catch (err) {
@@ -173,6 +175,28 @@ export function CreateRoundModal({ isOpen, onClose }) {
               required
               className="w-full px-3 py-2 rounded-xl bg-[#181836] border border-[#3b3b6d] text-white text-xs focus:outline-none focus:border-[#d4f717] resize-none"
             />
+          </div>
+
+          {/* Target Grant Repository */}
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-mono text-[#a3a3cf]">
+                Target Grant Repository (Verified Provenance)
+              </label>
+              <span className="text-[10px] font-mono text-[#d4f717]">
+                owner/repo
+              </span>
+            </div>
+            <input
+              type="text"
+              value={targetRepo}
+              onChange={(e) => setTargetRepo(e.target.value)}
+              placeholder="e.g. dotmantissa/themis"
+              className="w-full px-3 py-2 rounded-xl bg-[#181836] border border-[#3b3b6d] text-white font-mono text-xs focus:outline-none focus:border-[#d4f717]"
+            />
+            <p className="text-[10px] text-[#a3a3cf] mt-1">
+              Pull requests submitted to this round must strictly originate from this repository.
+            </p>
           </div>
 
           {/* Financial and Duration Parameters */}

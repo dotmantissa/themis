@@ -1,3 +1,9 @@
+import dns from "node:dns";
+dns.setDefaultResultOrder("ipv4first");
+
+import { Agent, setGlobalDispatcher, interceptors } from "undici";
+setGlobalDispatcher(new Agent({ connect: { family: 4 } }).compose(interceptors.decompress()));
+
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,13 +27,22 @@ const contractAddress =
   deployedInfo?.contractAddress ||
   "0x016A4143cACEc8Ce4Ac0DD241260D5426C0eeE39";
 
-const privateKey =
-  process.env.DEPLOYER_KEY ||
-  "0xd4479070c2a31da31a01e732ca51707132bacdb480aae432a0c8bd0b91eba4b7";
+// Load signer key strictly from environment variables without hardcoded fallbacks
+const rawPrivateKey = process.env.DEPLOYER_KEY?.trim();
+if (!rawPrivateKey) {
+  console.warn("[Themis On-Chain] Warning: DEPLOYER_KEY environment variable is not configured. Read-only mode active.");
+}
+
+const privateKey = rawPrivateKey
+  ? (rawPrivateKey.startsWith("0x") ? rawPrivateKey : `0x${rawPrivateKey}`)
+  : null;
+
+const wallet = privateKey ? new ethers.Wallet(privateKey) : null;
+export const DEPLOYER_ADDRESS = wallet
+  ? wallet.address
+  : "0x0000000000000000000000000000000000000000";
 
 const RPC_URL = process.env.GENLAYER_RPC_URL || "https://studio.genlayer.com/api";
-const wallet = new ethers.Wallet(privateKey);
-export const DEPLOYER_ADDRESS = wallet.address;
 
 export async function rpcCall(method, params = []) {
   const res = await fetch(RPC_URL, {
@@ -35,6 +50,7 @@ export async function rpcCall(method, params = []) {
     headers: {
       "Content-Type": "application/json",
       "Accept": "application/json",
+      "Accept-Encoding": "identity",
     },
     body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }),
   });
@@ -48,6 +64,9 @@ export async function rpcCall(method, params = []) {
 const customProvider = {
   async request({ method, params = [] }) {
     if (method === "eth_sendTransaction") {
+      if (!wallet) {
+        throw new Error("DEPLOYER_KEY is not configured in environment; cannot sign transactions");
+      }
       const tx = params[0];
       const nonce = await rpcCall("eth_getTransactionCount", [
         DEPLOYER_ADDRESS,
@@ -183,19 +202,48 @@ export async function readClaimsByRoundOnChain(roundId) {
 }
 
 /**
- * Abstracted Grant Claim Submission
- * Relayer submits the transaction and posts the refundable bond on claimant's behalf.
+ * Check whether a PR or contribution evidence is already used on-chain
+ */
+export async function isEvidenceUsedOnChain(prUrl) {
+  try {
+    const raw = await glClient.readContract({
+      address: contractAddress,
+      functionName: "is_evidence_used",
+      args: [String(prUrl).trim()],
+    });
+    if (!raw) return { is_used: false };
+    return typeof raw === "string" ? JSON.parse(raw) : raw;
+  } catch (err) {
+    console.error("[Themis On-Chain] Failed to check evidence used:", err.message);
+    return { is_used: false };
+  }
+}
+
+/**
+ * Abstracted Grant Claim Submission with User-Bound Custody
+ * Relayer sponsors transaction broadcast and bond posting, but smart contract
+ * guarantees claimant identity and custody belongs strictly to claimantAddress.
  */
 export async function submitClaimAbstracted({
   claimId,
   roundId,
   prUrl,
   activityUrl,
+  claimantAddress,
+  builderGithub = "",
   screenshotUrl = "",
   notes = "",
   bondWei = 10000000000000000n, // Default 0.01 GEN bond
 }) {
-  console.log(`[Themis Relayer] Submitting abstracted claim ${claimId} for round ${roundId}...`);
+  if (!wallet) {
+    throw new Error("DEPLOYER_KEY environment variable is required to execute write transactions");
+  }
+
+  if (!claimantAddress || !ethers.isAddress(claimantAddress)) {
+    throw new Error(`Invalid builder claimant address for user-bound custody: ${claimantAddress}`);
+  }
+
+  console.log(`[Themis Relayer] Submitting claim ${claimantAddress} -> claim ${claimId} in round ${roundId}...`);
 
   const round = await readRoundOnChain(roundId);
   if (!round) {
@@ -207,13 +255,21 @@ export async function submitClaimAbstracted({
   const txHash = await glClient.writeContract({
     address: contractAddress,
     functionName: "submit_grant_claim",
-    args: [claimId, roundId, prUrl, activityUrl, screenshotUrl, notes],
+    args: [
+      claimId,
+      roundId,
+      prUrl,
+      activityUrl,
+      claimantAddress,
+      builderGithub,
+      screenshotUrl,
+      notes,
+    ],
     value: requiredBond,
   });
 
   console.log(`[Themis Relayer] Claim tx submitted: ${txHash}, waiting for consensus...`);
 
-  // Wait for receipt asynchronously
   const receipt = await glClient.waitForTransactionReceipt({
     hash: txHash,
     status: "ACCEPTED",
@@ -224,7 +280,6 @@ export async function submitClaimAbstracted({
 
   console.log(`[Themis Relayer] Claim tx accepted on-chain: ${receipt.hash}`);
 
-  // Read updated claim
   const updatedClaim = await readClaimOnChain(claimId);
 
   return {
@@ -234,7 +289,7 @@ export async function submitClaimAbstracted({
 }
 
 /**
- * Abstracted Round Creation
+ * Abstracted Round Creation with Target Grant Repository
  */
 export async function createRoundAbstracted({
   roundId,
@@ -246,8 +301,13 @@ export async function createRoundAbstracted({
   finalitySeconds = 3600,
   durationSeconds = 604800,
   rewardRecipientsCount = 1,
+  targetRepo = "",
 }) {
-  console.log(`[Themis Relayer] Submitting abstracted round creation ${roundId}...`);
+  if (!wallet) {
+    throw new Error("DEPLOYER_KEY environment variable is required to execute write transactions");
+  }
+
+  console.log(`[Themis Relayer] Submitting abstracted round creation ${roundId} (repo: ${targetRepo})...`);
 
   const txHash = await glClient.writeContract({
     address: contractAddress,
@@ -261,6 +321,7 @@ export async function createRoundAbstracted({
       Number(finalitySeconds),
       Number(durationSeconds),
       Number(rewardRecipientsCount),
+      targetRepo,
     ],
     value: BigInt(poolDepositWei),
   });
@@ -284,6 +345,10 @@ export async function createRoundAbstracted({
  * Abstracted Round Payouts Finalization
  */
 export async function finalizeRoundAbstracted(roundId) {
+  if (!wallet) {
+    throw new Error("DEPLOYER_KEY environment variable is required to execute write transactions");
+  }
+
   console.log(`[Themis Relayer] Finalizing round payouts for ${roundId}...`);
 
   const txHash = await glClient.writeContract({
@@ -313,6 +378,10 @@ export async function finalizeRoundAbstracted(roundId) {
  * Abstracted Claim Settlement
  */
 export async function settleClaimAbstracted(claimId) {
+  if (!wallet) {
+    throw new Error("DEPLOYER_KEY environment variable is required to execute write transactions");
+  }
+
   console.log(`[Themis Relayer] Executing abstracted settlement for claim ${claimId}...`);
 
   const txHash = await glClient.writeContract({
@@ -340,6 +409,10 @@ export async function settleClaimAbstracted(claimId) {
  * Abstracted Appeal Registration
  */
 export async function appealClaimAbstracted(claimId, reason) {
+  if (!wallet) {
+    throw new Error("DEPLOYER_KEY environment variable is required to execute write transactions");
+  }
+
   console.log(`[Themis Relayer] Submitting appeal for claim ${claimId}...`);
 
   const txHash = await glClient.writeContract({
@@ -367,6 +440,10 @@ export async function appealClaimAbstracted(claimId, reason) {
  * Drip native GEN from deployer wallet to a user's embedded wallet
  */
 export async function dripNativeGen(recipientAddress, amountGen = "10") {
+  if (!wallet) {
+    throw new Error("DEPLOYER_KEY environment variable is required to drip GEN");
+  }
+
   if (!recipientAddress || !ethers.isAddress(recipientAddress)) {
     throw new Error(`Invalid recipient address: ${recipientAddress}`);
   }
@@ -417,4 +494,3 @@ export async function getWalletBalance(address) {
     return { address, balanceWei: "0", balanceGen: "0" };
   }
 }
-

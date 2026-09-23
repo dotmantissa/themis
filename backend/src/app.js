@@ -16,6 +16,7 @@ import {
   appealClaimAbstracted,
   dripNativeGen,
   getWalletBalance,
+  isEvidenceUsedOnChain,
 } from "./genlayer.js";
 import { optionalAuth, requireAuth } from "./privy.js";
 
@@ -287,7 +288,7 @@ app.get(["/api/rounds", "/rounds"], async (req, res) => {
           const expiresAtVal = onChainData.expires_at ? new Date(Number(onChainData.expires_at) * 1000) : null;
           await sql`
             INSERT INTO rounds (
-              round_id, creator, title, description,
+              round_id, creator, title, description, target_repo,
               pool_wei, remaining_pool_wei, grant_amount_wei, bond_amount_wei,
               finality_window_seconds, duration_seconds, reward_recipients_count, expires_at, status, created_at
             ) VALUES (
@@ -295,6 +296,7 @@ app.get(["/api/rounds", "/rounds"], async (req, res) => {
               ${onChainData.creator || "0x0"},
               ${onChainData.title || "Grant Round"},
               ${onChainData.description || ""},
+              ${onChainData.target_repo || ""},
               ${onChainData.pool_wei || "0"},
               ${onChainData.remaining_pool_wei || "0"},
               ${onChainData.reward_amount_per_recipient_wei || onChainData.grant_amount_per_claim_wei || "0"},
@@ -445,7 +447,11 @@ app.post(["/api/rounds", "/rounds"], optionalAuth, async (req, res) => {
       finalitySeconds = 3600,
       durationSeconds = 604800,
       rewardRecipientsCount = 1,
+      targetRepo = "",
+      target_repo = "",
     } = req.body;
+
+    const assignedTargetRepo = (targetRepo || target_repo || "").trim();
 
     if (!roundId || !title || !grantAmountWei || !bondAmountWei || !poolDepositWei) {
       return res.status(400).json({ error: "Missing required round parameters" });
@@ -466,12 +472,13 @@ app.post(["/api/rounds", "/rounds"], optionalAuth, async (req, res) => {
       finalitySeconds,
       durationSeconds: durationSec,
       rewardRecipientsCount: recipientsCount,
+      targetRepo: assignedTargetRepo,
     });
 
     // Record in Neon DB
     await sql`
       INSERT INTO rounds (
-        round_id, creator, title, description,
+        round_id, creator, title, description, target_repo,
         pool_wei, remaining_pool_wei, grant_amount_wei, bond_amount_wei,
         finality_window_seconds, duration_seconds, reward_recipients_count, expires_at, status, tx_hash
       ) VALUES (
@@ -479,6 +486,7 @@ app.post(["/api/rounds", "/rounds"], optionalAuth, async (req, res) => {
         ${round?.creator || getDeployerAddress()},
         ${title},
         ${description || ""},
+        ${assignedTargetRepo || round?.target_repo || ""},
         ${String(poolDepositWei)},
         ${String(poolDepositWei)},
         ${String(grantAmountWei)},
@@ -491,6 +499,7 @@ app.post(["/api/rounds", "/rounds"], optionalAuth, async (req, res) => {
         ${txHash}
       )
       ON CONFLICT (round_id) DO UPDATE SET
+        target_repo = COALESCE(EXCLUDED.target_repo, rounds.target_repo),
         remaining_pool_wei = EXCLUDED.remaining_pool_wei,
         pool_wei = EXCLUDED.pool_wei,
         duration_seconds = EXCLUDED.duration_seconds,
@@ -546,6 +555,20 @@ app.get(["/api/claims", "/claims"], async (req, res) => {
   }
 });
 
+/**
+ * Evidence Deduplication Pre-flight Check
+ */
+app.get(["/api/claims/check-evidence", "/claims/check-evidence"], async (req, res) => {
+  try {
+    const { prUrl } = req.query;
+    if (!prUrl) return res.status(400).json({ error: "prUrl parameter is required" });
+    const result = await isEvidenceUsedOnChain(prUrl);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message || "Failed to check evidence" });
+  }
+});
+
 app.get(["/api/claims/:id", "/claims/:id"], async (req, res) => {
   try {
     const claimId = req.params.id;
@@ -579,6 +602,8 @@ app.post(["/api/claims/submit", "/claims/submit"], optionalAuth, async (req, res
       roundId,
       prUrl,
       activityUrl,
+      claimantAddress,
+      builderGithub,
       screenshotUrl = "",
       notes = "",
       claimantEmail,
@@ -590,28 +615,86 @@ app.post(["/api/claims/submit", "/claims/submit"], optionalAuth, async (req, res
       return res.status(400).json({ error: "Missing required claim parameters" });
     }
 
-    console.log(`[Claim Submit] Processing claim ${claimId} by ${email}`);
-
-    // Pre-flight check: verify round expiry before submitting
-    const roundCheck = await sql`SELECT * FROM rounds WHERE round_id = ${roundId} LIMIT 1`;
-    if (roundCheck.length) {
-      const r = roundCheck[0];
-      const expiresAtMs = r.expires_at ? new Date(r.expires_at).getTime() : null;
-
-      if (expiresAtMs && Date.now() >= expiresAtMs) {
-        return res.status(400).json({ error: "Grant round timeline has elapsed; applications are closed" });
+    // Determine claimantAddress for User-Bound Custody
+    let targetClaimant = claimantAddress || req.user?.wallet_address || req.body.walletAddress;
+    if (!targetClaimant && email) {
+      const u = await sql`SELECT wallet_address FROM users WHERE email = ${email.trim().toLowerCase()} LIMIT 1`;
+      if (u[0]?.wallet_address) {
+        targetClaimant = u[0].wallet_address;
       }
     }
 
-    // Call on-chain abstracted relayer
+    if (!targetClaimant || !targetClaimant.startsWith("0x")) {
+      return res.status(400).json({
+        error: "claimantAddress (builder wallet) is required to enforce user-bound custody",
+      });
+    }
+
+    console.log(`[Claim Submit] Processing claim ${claimId} by ${email} bound to custody address ${targetClaimant}`);
+
+    // Pre-flight check 1: Verify round expiry before submitting
+    let targetRepo = null;
+    let expiresAtMs = null;
+    const roundCheck = await sql`SELECT * FROM rounds WHERE round_id = ${roundId} LIMIT 1`;
+    if (roundCheck.length) {
+      expiresAtMs = roundCheck[0].expires_at ? new Date(roundCheck[0].expires_at).getTime() : null;
+      targetRepo = roundCheck[0].target_repo;
+    }
+    // Also consult on-chain round if targetRepo is not in DB yet
+    if (!targetRepo) {
+      const onChainRound = await readRoundOnChain(roundId);
+      if (onChainRound) {
+        targetRepo = onChainRound.target_repo;
+        if (!expiresAtMs && onChainRound.expires_at) {
+          expiresAtMs = Number(onChainRound.expires_at) * 1000;
+        }
+        if (targetRepo) {
+          await sql`UPDATE rounds SET target_repo = ${targetRepo} WHERE round_id = ${roundId}`;
+        }
+      }
+    }
+
+    if (expiresAtMs && Date.now() >= expiresAtMs) {
+      return res.status(400).json({ error: "Grant round timeline has elapsed; applications are closed" });
+    }
+
+    // Pre-flight check 2: Grant repository binding
+    if (targetRepo) {
+      const expectedRepo = targetRepo.trim().toLowerCase();
+      const m = prUrl.match(/(?:github\.com\/|api\.github\.com\/repos\/)([^/]+\/[^/#?]+)/i);
+      const prRepo = m ? m[1].toLowerCase().replace(/\.git$/, "") : "";
+      if (prRepo && prRepo !== expectedRepo) {
+        return res.status(400).json({
+          error: `PR repository '${prRepo}' does not match grant repository '${expectedRepo}'`,
+        });
+      }
+    }
+
+    // Pre-flight check 3: Reusable evidence check
+    const evidenceStatus = await isEvidenceUsedOnChain(prUrl);
+    if (evidenceStatus?.is_used) {
+      return res.status(400).json({
+        error: `Evidence already used: Pull request has already been claimed on-chain in claim ${evidenceStatus.claim_id}`,
+      });
+    }
+
+    // Call on-chain abstracted relayer with user-bound custody
     const { txHash, claim } = await submitClaimAbstracted({
       claimId,
       roundId,
       prUrl,
       activityUrl,
+      claimantAddress: targetClaimant,
+      builderGithub: builderGithub || "",
       screenshotUrl,
       notes,
     });
+
+    if (!claim) {
+      return res.status(400).json({
+        error: "Claim submission rejected or failed to read on-chain claim state",
+      });
+    }
 
     // Mirror to Neon DB
     const finalityDate = claim.finality_expires_at
@@ -621,6 +704,7 @@ app.post(["/api/claims/submit", "/claims/submit"], optionalAuth, async (req, res
     const inserted = await sql`
       INSERT INTO claims (
         claim_id, round_id, claimant, claimant_email,
+        builder_github, canonical_evidence, target_repo, pr_author, author_matched,
         pr_url, activity_url, screenshot_url, notes,
         bond_wei, grant_wei,
         tier1_pr_merged, tier2_sybil_score, tier2_sybil_tier,
@@ -630,8 +714,13 @@ app.post(["/api/claims/submit", "/claims/submit"], optionalAuth, async (req, res
       ) VALUES (
         ${claimId},
         ${roundId},
-        ${claim.claimant || getDeployerAddress()},
+        ${claim.claimant || targetClaimant},
         ${email},
+        ${claim.builder_github || builderGithub || ""},
+        ${claim.canonical_evidence || null},
+        ${claim.target_repo || null},
+        ${claim.pr_author || null},
+        ${claim.author_matched !== undefined ? Boolean(claim.author_matched) : true},
         ${prUrl},
         ${activityUrl},
         ${screenshotUrl || null},
@@ -653,6 +742,12 @@ app.post(["/api/claims/submit", "/claims/submit"], optionalAuth, async (req, res
         ${txHash}
       )
       ON CONFLICT (claim_id) DO UPDATE SET
+        claimant = EXCLUDED.claimant,
+        builder_github = EXCLUDED.builder_github,
+        canonical_evidence = EXCLUDED.canonical_evidence,
+        target_repo = EXCLUDED.target_repo,
+        pr_author = EXCLUDED.pr_author,
+        author_matched = EXCLUDED.author_matched,
         tier1_pr_merged = EXCLUDED.tier1_pr_merged,
         tier2_sybil_score = EXCLUDED.tier2_sybil_score,
         tier2_sybil_tier = EXCLUDED.tier2_sybil_tier,
@@ -695,14 +790,28 @@ app.post(["/api/claims/submit", "/claims/submit"], optionalAuth, async (req, res
   }
 });
 
-/**
- * Execute Settlement (Abstracted Transaction)
- * Transfers grant + bond refund to claimant or slashes bond if fraud detected.
- */
 app.post(["/api/claims/:id/settle", "/claims/:id/settle"], optionalAuth, async (req, res) => {
   try {
     const claimId = req.params.id;
     console.log(`[Claim Settle] Executing settlement for ${claimId}`);
+
+    // Pre-flight check: Prevent appealed or non-final claims from being settled
+    const existing = await readClaimOnChain(claimId);
+    if (existing) {
+      if (existing.is_appealed || existing.status === "APPEALED") {
+        return res.status(400).json({
+          error: "Claim has an active appeal in progress and cannot be settled",
+        });
+      }
+
+      const nowTs = Math.floor(Date.now() / 1000);
+      const finalityExp = Number(existing.finality_expires_at || 0);
+      if (nowTs < finalityExp) {
+        return res.status(400).json({
+          error: `Claim appeal window is still active (${finalityExp - nowTs}s remaining); non-final claims cannot be settled`,
+        });
+      }
+    }
 
     const { txHash, claim } = await settleClaimAbstracted(claimId);
 

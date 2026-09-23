@@ -1,12 +1,12 @@
 {
   "contractName": "ThemisGrantEscrow",
-  "contractAddress": "0x016A4143cACEc8Ce4Ac0DD241260D5426C0eeE39",
-  "deploymentTxHash": "0x6d8ef2fdbd219af2cb274111291566aa7c3de45106ddc11471cf1af0b2757800",
+  "contractAddress": "0xF09CA43446e0F7f5037883BD1D4522e515313A16",
+  "deploymentTxHash": "0x9f70d9002ccb09844cd5cc383c8d543f163f8670f7e6577d6f3fbdbb175bdf71",
   "deployerAddress": "0xBC1399c55538eC034d4Da550C03c34Ae0C357f53",
   "network": "studionet",
   "chainId": 61999,
   "rpcUrl": "https://studio.genlayer.com/api",
   "explorerUrl": "https://genlayer-explorer.vercel.app",
-  "deployedAt": "2026-09-22T08:54:14.483Z",
-  "sourceSha256": "febf4e9b5b2c921ecd3a455d1d3923b03cf4b338e0bf97b7eff3fefe9d59f176"
+  "deployedAt": "2026-09-23T16:39:28.202Z",
+  "sourceSha256": "3c8c80f5c8b8def310025ec9adbda5ac8d4a43379026a50185a74c2706f7eb69"
 }

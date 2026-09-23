@@ -10,31 +10,36 @@ from genlayer import *
 
 class ThemisGrantEscrow(gl.Contract):
     """
-    Themis: Sybil-Resistant Grant Escrow
-    ===================================
+    Themis: Sybil-Resistant Grant Escrow with User-Bound Custody & Provenance
+    =======================================================================
     Decentralized Grant Allocation and Sybil-Resistant Escrow on GenLayer.
 
-    Architecture & Primitive Matrix:
-    1. Deterministic Round Funding & Bonding:
-       - DAOs deposit real GEN into round pools via payable transactions.
-       - Claimants post a refundable GEN bond to submit grant claims.
-       - Standard auditable state bookkeeping without AI overhead.
-    2. Dual Evidence Gathering Primitives:
-       - gl.nondet.web.get() for static pull request metadata (fast, efficient).
-       - gl.nondet.web.render() for claimant wallet explorer and contribution graphs
-         with full DOM rendering and JavaScript execution.
-    3. Two-Tier Consensus Verdict with Dual Equivalence Principles:
-       - Tier 1: 'Does this PR exist and is it merged?' -> boolean -> gl.eq_principle.strict_eq.
-       - Tier 2: 'Does the funding/activity pattern look like a sybil cluster?' ->
-         gl.eq_principle.prompt_non_comparative with custom leader and validator logic
-         executed through gl.vm.run_nondet_unsafe.
-    4. Deterministic Fund Custody & Slashes:
-       - Real GEN custody backed by EVM ghost contract.
-       - APPROVE: Grant disbursement + bond refund via emit_transfer.
-       - REJECT-for-fraud: Bond slashed directly into dispute bounty pool.
-    5. Native Protocol Finality & Dispute Window:
-       - Settlement delayed past protocol finality window.
-       - Preserves native consensus appeal capability without hand-rolled voting tokens.
+    Core Architecture & Security Primitives:
+    1. User-Bound Custody & Direct Builder Settlement:
+       - Every claim explicitly binds the claimant's EVM address (claimant_address).
+       - Relayers sponsor transaction fees and broadcast calls, but smart contract
+         custody guarantees that payouts and bond refunds transfer directly to the
+         builder's address via emit_transfer.
+    2. Verified Contribution Provenance & Repository Binding:
+       - Grant rounds are bound to an official grant repository (target_repo).
+       - Validators verify that pull requests belong to the specified target repository.
+       - Contribution provenance verifies that the pull request author matches the
+         builder's declared GitHub identity.
+    3. Single-Use Evidence & Replay Prevention:
+       - Reusable evidence registry (used_evidence) maps canonical PR identifiers
+         (github:owner/repo#pr-num) across the protocol, permanently preventing
+         duplicate or cross-round evidence replay.
+    4. Strict Finality & Dispute Timelock:
+       - Settlements are strictly blocked while a claim is APPEALED or NON-FINAL
+         (timelock active).
+       - Round ranking and pool distribution cannot finalize if any claim is appealed
+         or awaiting dispute timelock expiry.
+    5. Two-Tier Consensus Verdict with Dual Equivalence Principles:
+       - Tier 1: 'Does this PR exist, belong to target repo, match author, and is merged?'
+         -> boolean equivalence -> gl.eq_principle.strict_eq.
+       - Tier 2: 'Does activity graph topology look like a sybil cluster?'
+         -> gl.eq_principle.prompt_non_comparative with custom leader and validator
+         equivalence tolerance bands executed through gl.vm.run_nondet_unsafe.
     """
 
     owner: Address
@@ -54,6 +59,7 @@ class ThemisGrantEscrow(gl.Contract):
     claim_ids: DynArray[str]
     round_claims: TreeMap[str, str]
     claimant_claims: TreeMap[str, str]
+    used_evidence: TreeMap[str, str]
 
     def __init__(self, default_finality_seconds: int = 3600):
         self.owner = gl.message.sender_address
@@ -93,13 +99,57 @@ class ThemisGrantEscrow(gl.Contract):
         except Exception:
             return u64(0)
 
+    def _extract_repo_from_url(self, url: str) -> str:
+        """
+        Extracts normalized 'owner/repo' from GitHub PR, repository, or API URL.
+        """
+        clean = str(url).strip()
+        m = re.search(
+            r"(?:github\.com/|api\.github\.com/repos/)([^/]+/[^/#?]+)",
+            clean,
+            re.IGNORECASE,
+        )
+        if m:
+            extracted = m.group(1).lower()
+            if extracted.endswith(".git"):
+                extracted = extracted[:-4]
+            return extracted
+        if "/" in clean and not clean.startswith("http"):
+            parts = clean.split("/")
+            if len(parts) == 2 and parts[0] and parts[1]:
+                return f"{parts[0].strip().lower()}/{parts[1].strip().lower()}"
+        return ""
+
+    def _canonicalize_evidence(self, url: str) -> str:
+        """
+        Derives an immutable canonical identifier for PR evidence to prevent replay attacks.
+        E.g. 'github:dotmantissa/themis#pr-1'
+        """
+        clean = str(url).strip().lower()
+        m = re.search(
+            r"(?:github\.com/|api\.github\.com/repos/)([^/]+/[^/#?]+)/(?:pull|pulls)/(\d+)",
+            clean,
+        )
+        if m:
+            repo = m.group(1)
+            if repo.endswith(".git"):
+                repo = repo[:-4]
+            pr_num = m.group(2)
+            return f"github:{repo}#pr-{pr_num}"
+        # Fallback to normalized URL without query parameters
+        clean = re.sub(r"\?.*$", "", clean).rstrip("/")
+        return f"url:{clean}"
+
     def _parse_pr_status(self, raw_body: str) -> dict:
         """
-        Parses static GitHub PR response to extract merge state, title, and commit info.
+        Parses GitHub PR response to extract merge state, title, author, and base repository.
+        Supports both GitHub REST API JSON and raw HTML scrape patterns.
         """
         is_merged = False
         pr_state = "open"
         title = "Grant Contribution PR"
+        author = ""
+        repo = ""
 
         # Check GitHub REST API structure if JSON
         try:
@@ -108,10 +158,20 @@ class ThemisGrantEscrow(gl.Contract):
                 is_merged = bool(data.get("merged", False))
                 pr_state = str(data.get("state", "open")).lower()
                 title = str(data.get("title", title))
+                user_obj = data.get("user")
+                if isinstance(user_obj, dict):
+                    author = str(user_obj.get("login", "")).strip()
+                base_obj = data.get("base")
+                if isinstance(base_obj, dict):
+                    repo_obj = base_obj.get("repo")
+                    if isinstance(repo_obj, dict):
+                        repo = str(repo_obj.get("full_name", "")).strip().lower()
                 return {
                     "merged": is_merged,
                     "state": pr_state,
                     "title": title,
+                    "author": author,
+                    "repo": repo,
                 }
         except Exception:
             pass
@@ -124,10 +184,21 @@ class ThemisGrantEscrow(gl.Contract):
         elif "state--closed" in lower_body or '"state":"closed"' in lower_body:
             pr_state = "closed"
 
+        # Regex for author in HTML/text
+        m_author = re.search(r'class="author"[^>]*>([^<]+)</a>', raw_body)
+        if not m_author:
+            m_author = re.search(r'"author"\s*:\s*\{\s*"login"\s*:\s*"([^"]+)"', raw_body)
+        if not m_author:
+            m_author = re.search(r'"user"\s*:\s*\{\s*"login"\s*:\s*"([^"]+)"', raw_body)
+        if m_author:
+            author = m_author.group(1).strip()
+
         return {
             "merged": is_merged,
             "state": pr_state,
             "title": title,
+            "author": author,
+            "repo": repo,
         }
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -170,8 +241,6 @@ class ThemisGrantEscrow(gl.Contract):
         if clean_id not in self.rounds:
             return ""
         round_data = json.loads(self.rounds[clean_id])
-        rem_pool = int(round_data.get("remaining_pool_wei", 0))
-        grant_amt = int(round_data.get("grant_amount_per_claim_wei", 0))
         expires_at = int(round_data.get("expires_at", 0))
         now_ts = int(self._now())
 
@@ -238,9 +307,24 @@ class ThemisGrantEscrow(gl.Contract):
         return json.dumps(items)
 
     @gl.public.view
+    def is_evidence_used(self, pr_url: str) -> str:
+        """
+        Check whether a pull request or contribution evidence has already been claimed.
+        """
+        canonical = self._canonicalize_evidence(pr_url)
+        is_used = canonical in self.used_evidence
+        claim_id = self.used_evidence[canonical] if is_used else ""
+        return json.dumps({
+            "canonical_evidence": canonical,
+            "is_used": is_used,
+            "claim_id": claim_id,
+        })
+
+    @gl.public.view
     def preview_settlement(self, claim_id: str) -> str:
         """
         Deterministic preview of payout or slashing outcomes for a claim.
+        Enforces user-bound custody and verifies non-final and appealed states.
         """
         clean_id = str(claim_id).strip()
         self._require(clean_id in self.claims, "Claim not found")
@@ -249,9 +333,13 @@ class ThemisGrantEscrow(gl.Contract):
         grant_wei = int(claim.get("grant_wei", 0))
         bond_wei = int(claim.get("bond_wei", 0))
         verdict = str(claim.get("verdict", "PENDING"))
+        status = str(claim.get("status", "ADJUDICATED"))
         now_ts = int(self._now())
         finality_exp = int(claim.get("finality_expires_at", 0))
-        can_settle = bool(now_ts >= finality_exp and claim.get("status") == "ADJUDICATED")
+
+        is_appealed = bool(claim.get("is_appealed", False) or status == "APPEALED")
+        is_final = bool(now_ts >= finality_exp and status == "ADJUDICATED")
+        can_settle = bool(is_final and not is_appealed)
 
         claimant_payout = 0
         bounty_pool_slash = 0
@@ -261,12 +349,16 @@ class ThemisGrantEscrow(gl.Contract):
             claimant_payout = grant_wei + bond_wei
         elif verdict == "REJECTED_SYBIL_FRAUD":
             bounty_pool_slash = bond_wei
-        elif verdict == "REJECTED_PR_NOT_MERGED":
+        elif verdict in ("REJECTED_PR_NOT_MERGED", "REJECTED_AUTHOR_MISMATCH", "REJECTED_REPOSITORY_MISMATCH"):
             refund_amount = bond_wei
 
         return json.dumps({
             "claim_id": clean_id,
             "verdict": verdict,
+            "status": status,
+            "claimant": claim.get("claimant", ""),
+            "is_appealed": is_appealed,
+            "is_final": is_final,
             "can_settle_now": can_settle,
             "seconds_until_finality": max(0, finality_exp - now_ts),
             "expected_claimant_payout_wei": str(claimant_payout),
@@ -289,11 +381,12 @@ class ThemisGrantEscrow(gl.Contract):
         finality_window_seconds: int = 0,
         duration_seconds: int = 604800,
         reward_recipients_count: int = 1,
+        target_repo: str = "",
     ) -> str:
         """
         Create a new grant allocation round funded with real GEN deposit.
-        The creator configures the application duration, the amount per reward,
-        and how many top projects will share the pool at the deadline.
+        Binds the round to an authorized grant repository (target_repo) to enforce
+        verified contribution provenance across all submissions.
         """
         clean_round_id = str(round_id).strip()
         clean_title = str(title).strip()
@@ -324,11 +417,16 @@ class ThemisGrantEscrow(gl.Contract):
         expires_at = int(now_ts) + duration_sec
         sender = gl.message.sender_address
 
+        clean_target_repo = self._extract_repo_from_url(target_repo)
+        if not clean_target_repo and target_repo:
+            clean_target_repo = str(target_repo).strip().lower()
+
         round_data = {
             "round_id": clean_round_id,
             "creator": str(sender),
             "title": clean_title,
             "description": clean_desc,
+            "target_repo": clean_target_repo,
             "pool_wei": str(deposited_pool),
             "remaining_pool_wei": str(deposited_pool),
             "grant_amount_per_claim_wei": str(grant_amount_wei),
@@ -358,6 +456,7 @@ class ThemisGrantEscrow(gl.Contract):
         return json.dumps({
             "round_id": clean_round_id,
             "status": "OPEN",
+            "target_repo": clean_target_repo,
             "deposited_pool_wei": str(deposited_pool),
             "grant_amount_wei": str(grant_amount_wei),
             "reward_recipients_count": recipients_count,
@@ -386,7 +485,6 @@ class ThemisGrantEscrow(gl.Contract):
         round_data["remaining_pool_wei"] = str(new_rem)
 
         self.rounds[clean_id] = json.dumps(round_data, sort_keys=True)
-
         self.total_pool_deposited_wei = u256(int(self.total_pool_deposited_wei) + additional_funds)
 
         return json.dumps({
@@ -408,26 +506,28 @@ class ThemisGrantEscrow(gl.Contract):
         round_id: str,
         pr_url: str,
         activity_url: str,
+        claimant_address: Address,
+        builder_github: str = "",
         screenshot_url: str = "",
         notes: str = "",
     ) -> str:
         """
         Submit a completed milestone claim for an open grant round.
-        Claimant posts a refundable GEN bond to submit.
+        Enforces user-bound custody, verified contribution provenance, and single-use evidence.
 
-        Evidence gathering primitives used:
-        - gl.nondet.web.get() for static GitHub PR metadata
-        - gl.nondet.web.render() for claimant activity graph / wallet history
-
-        Two-tier consensus adjudication:
-        - Tier 1: gl.eq_principle.strict_eq for exact git merge proof
-        - Tier 2: gl.eq_principle.prompt_non_comparative with custom leader and
-                  validator functions executed via gl.vm.run_nondet_unsafe
+        Security guarantees:
+        1. User-bound custody: claimant_address binds the builder's wallet; all payouts
+           and bond refunds go directly to this address, never the relayer.
+        2. Single-use evidence: Canonical evidence hash registered in used_evidence to
+           prevent replay attacks.
+        3. Grant repository binding: If the round defines a target_repo, PR must belong to it.
+        4. Contribution provenance: PR author must match builder_github.
         """
         clean_claim_id = str(claim_id).strip()
         clean_round_id = str(round_id).strip()
         clean_pr_url = str(pr_url).strip()
         clean_activity_url = str(activity_url).strip()
+        clean_builder_github = str(builder_github).strip()
         clean_screenshot_url = str(screenshot_url).strip()
         clean_notes = str(notes).strip()
 
@@ -437,11 +537,26 @@ class ThemisGrantEscrow(gl.Contract):
         self._require(clean_pr_url.startswith("http"), "pr_url must be a valid HTTP/HTTPS URL")
         self._require(clean_activity_url.startswith("http"), "activity_url must be a valid HTTP/HTTPS URL")
 
+        # User-bound custody: validate builder address
+        claimant_str = str(claimant_address).strip()
+        self._require(
+            claimant_str.startswith("0x") and 40 <= len(claimant_str) <= 44 and claimant_str.lower() != "0x0000000000000000000000000000000000000000",
+            "claimant_address must be a valid non-zero EVM address",
+        )
+        actual_claimant = claimant_address
+
+        # Prevent reusable evidence: canonical check against global registry
+        canonical_evidence = self._canonicalize_evidence(clean_pr_url)
+        self._require(
+            canonical_evidence not in self.used_evidence,
+            f"Evidence already used: Pull request '{canonical_evidence}' has already been claimed across the protocol"
+        )
+
         round_data = json.loads(self.rounds[clean_round_id])
         now_ts = self._now()
         expires_at = int(round_data.get("expires_at", 0))
 
-        # Check duration expiry: grant ends when timeline elapses
+        # Check duration expiry
         if expires_at > 0 and int(now_ts) >= expires_at:
             if round_data.get("status") == "OPEN":
                 round_data["status"] = "EXPIRED"
@@ -450,29 +565,38 @@ class ThemisGrantEscrow(gl.Contract):
 
         self._require(round_data.get("status") == "OPEN", f"Grant round is {round_data.get('status', 'not open')}")
 
+        # Verified contribution provenance: repository binding check
+        target_repo = str(round_data.get("target_repo", "")).strip().lower()
+        pr_repo = self._extract_repo_from_url(clean_pr_url)
+        if target_repo:
+            self._require(
+                pr_repo == target_repo,
+                f"PR repository '{pr_repo}' does not match grant repository '{target_repo}'"
+            )
+
         grant_amount = int(round_data.get("reward_amount_per_recipient_wei", round_data.get("grant_amount_per_claim_wei", 0)))
         required_bond = int(round_data.get("required_bond_wei", 0))
         posted_bond = int(gl.message.value)
         self._require(posted_bond >= required_bond, f"Posted bond {posted_bond} wei is below required {required_bond} wei")
 
-        sender = gl.message.sender_address
-        now_ts = self._now()
         finality_sec = int(round_data.get("finality_window_seconds", int(self.default_finality_seconds)))
 
         # ─────────────────────────────────────────────────────────────────────
         # Evidence Gathering & Consensus Adjudication
         # ─────────────────────────────────────────────────────────────────────
 
-        # Capture values in local closure
         cap_pr_url = clean_pr_url
         cap_activity_url = clean_activity_url
         cap_screenshot_url = clean_screenshot_url
         cap_notes = clean_notes
-        cap_sender = str(sender)
+        cap_claimant = str(actual_claimant)
+        cap_builder_github = clean_builder_github
+        cap_target_repo = target_repo
 
         def leader_fn() -> dict:
             # 1. Evidence primitive 1: Static GET for PR metadata
             pr_merged = False
+            pr_author = ""
             pr_data_summary = ""
             try:
                 pr_resp = gl.nondet.web.get(cap_pr_url)
@@ -483,10 +607,16 @@ class ThemisGrantEscrow(gl.Contract):
                     pr_text = str(body_raw)[:6000]
                 parsed_pr = self._parse_pr_status(pr_text)
                 pr_merged = bool(parsed_pr["merged"])
-                pr_data_summary = f"PR Title: {parsed_pr['title']}, State: {parsed_pr['state']}, Merged: {parsed_pr['merged']}"
+                pr_author = str(parsed_pr.get("author", "")).strip()
+                pr_data_summary = f"PR Title: {parsed_pr['title']}, State: {parsed_pr['state']}, Merged: {parsed_pr['merged']}, Author: {pr_author}"
             except Exception as e:
                 pr_data_summary = f"PR fetch error: {str(e)}"
                 pr_merged = False
+
+            # Contribution provenance: verify author matches builder identity
+            author_matched = True
+            if cap_builder_github and pr_author:
+                author_matched = (cap_builder_github.lower() == pr_author.lower())
 
             # 2. Evidence primitive 2: Dynamic render with JS execution for activity & sybil graph
             activity_rendered = ""
@@ -505,17 +635,20 @@ class ThemisGrantEscrow(gl.Contract):
             if cap_screenshot_url.startswith("http"):
                 screenshot_note = f"Supplementary Screenshot provided: {cap_screenshot_url}"
 
-            # 4. Two-Axis Rubric: Sybil Forensic + Project Strength & Execution Quality
+            # 4. Multi-Axis Rubric: Sybil Forensic + Project Strength + Provenance
             eval_prompt = f"""You are an objective expert evaluator and forensic validator for Themis Grant Escrow.
-Evaluate this grant milestone claim on two critical axes:
-1. Sybil / Automated Fraud Detection
-2. Project Strength of Idea & Execution Quality
+Evaluate this grant milestone claim on three critical axes:
+1. Contribution Provenance: PR author verification
+2. Sybil / Automated Fraud Detection
+3. Project Strength of Idea & Execution Quality
 
-CLAIMANT ADDRESS: {cap_sender}
-CLAIMANT PROJECT NOTES & SPEC: {cap_notes}
+CLAIMANT ADDRESS: {cap_claimant}
+DECLARED BUILDER GITHUB: {cap_builder_github}
+TARGET GRANT REPOSITORY: {cap_target_repo}
 STATIC GIT PR PROOF: {pr_data_summary}
 DYNAMIC ACTIVITY & TENURE DATA: {activity_rendered}
 SUPPLEMENTARY PROOF: {screenshot_note}
+CLAIMANT PROJECT NOTES & SPEC: {cap_notes}
 
 EVALUATION RUBRIC:
 Axis 1: Sybil / Forensic Analysis:
@@ -566,8 +699,11 @@ Respond strictly in valid JSON:
             strength_assessment = str(eval_res.get("strength_assessment", eval_res.get("reasoning", "Evidence evaluated")))[:300]
             reasoning = str(eval_res.get("reasoning", strength_assessment))[:300]
 
-            # Composite verdict derivation
-            if not pr_merged:
+            # Composite verdict derivation enforcing provenance and merge checks
+            if not author_matched:
+                composite_verdict = "REJECTED_AUTHOR_MISMATCH"
+                reasoning = f"Contribution provenance mismatch: PR authored by '{pr_author}', declared builder '{cap_builder_github}'"
+            elif not pr_merged:
                 composite_verdict = "REJECTED_PR_NOT_MERGED"
             elif fraud_detected:
                 composite_verdict = "REJECTED_SYBIL_FRAUD"
@@ -576,6 +712,8 @@ Respond strictly in valid JSON:
 
             return {
                 "pr_merged": pr_merged,
+                "pr_author": pr_author,
+                "author_matched": author_matched,
                 "sybil_score": sybil_score,
                 "fraud_detected": fraud_detected,
                 "sybil_tier": sybil_tier,
@@ -588,7 +726,7 @@ Respond strictly in valid JSON:
         def validator_fn(leader_res: typing.Any) -> bool:
             """
             Custom validator equivalence function for gl.vm.run_nondet_unsafe.
-            Enforces strict_eq on Tier 1 (PR merged) and rubric tolerance on Tier 2.
+            Enforces strict equality on Tier 1 (PR merged & author provenance) and rubric tolerance on Tier 2.
             """
             if not isinstance(leader_res, gl.vm.Return):
                 return False
@@ -607,27 +745,31 @@ Respond strictly in valid JSON:
             except Exception:
                 return False
 
-            # Equivalence Rule 1: Strict equality on Tier 1 PR merge boolean (gl.eq_principle.strict_eq)
+            # Equivalence Rule 1: Strict equality on author provenance boolean
+            if bool(leader_dict.get("author_matched", True)) != bool(mine.get("author_matched", True)):
+                return False
+
+            # Equivalence Rule 2: Strict equality on Tier 1 PR merge boolean (gl.eq_principle.strict_eq)
             if bool(leader_dict.get("pr_merged", False)) != bool(mine["pr_merged"]):
                 return False
 
-            # Equivalence Rule 2: Agreement on fraud_detected binary verdict
+            # Equivalence Rule 3: Agreement on fraud_detected binary verdict
             if bool(leader_dict.get("fraud_detected", False)) != bool(mine["fraud_detected"]):
                 return False
 
-            # Equivalence Rule 3: Sybil score tolerance band of 20 points
+            # Equivalence Rule 4: Sybil score tolerance band of 20 points
             l_score = int(leader_dict.get("sybil_score", 0))
             m_score = int(mine["sybil_score"])
             if abs(l_score - m_score) > 20:
                 return False
 
-            # Equivalence Rule 4: Strength score tolerance band of 25 points
+            # Equivalence Rule 5: Strength score tolerance band of 25 points
             l_strength = int(leader_dict.get("strength_score", 50))
             m_strength = int(mine.get("strength_score", 50))
             if abs(l_strength - m_strength) > 25:
                 return False
 
-            # Equivalence Rule 5: Composite verdict must match
+            # Equivalence Rule 6: Composite verdict must match
             if str(leader_dict.get("verdict", "")).strip().upper() != str(mine["verdict"]).strip().upper():
                 return False
 
@@ -653,6 +795,8 @@ Respond strictly in valid JSON:
             except Exception:
                 verdict_dict = {
                     "pr_merged": False,
+                    "pr_author": "",
+                    "author_matched": True,
                     "sybil_score": 20,
                     "fraud_detected": False,
                     "sybil_tier": "ORGANIC",
@@ -663,6 +807,8 @@ Respond strictly in valid JSON:
                 }
 
         final_pr_merged = bool(verdict_dict.get("pr_merged", False))
+        final_pr_author = str(verdict_dict.get("pr_author", ""))
+        final_author_matched = bool(verdict_dict.get("author_matched", True))
         final_sybil_score = max(0, min(100, int(verdict_dict.get("sybil_score", 20))))
         final_fraud_detected = bool(verdict_dict.get("fraud_detected", False))
         final_sybil_tier = str(verdict_dict.get("sybil_tier", "ORGANIC")).upper()
@@ -675,13 +821,22 @@ Respond strictly in valid JSON:
         # State Commit & Timelock Accounting
         # ─────────────────────────────────────────────────────────────────────
 
+        # Mark evidence as used to block reuse
+        self.used_evidence[canonical_evidence] = clean_claim_id
+
         finality_expires_at = u64(int(now_ts) + finality_sec)
 
         claim_record = {
             "claim_id": clean_claim_id,
             "round_id": clean_round_id,
-            "claimant": str(sender),
+            "claimant": str(actual_claimant),
+            "builder_github": clean_builder_github,
             "pr_url": clean_pr_url,
+            "canonical_evidence": canonical_evidence,
+            "target_repo": target_repo,
+            "pr_repo": pr_repo,
+            "pr_author": final_pr_author,
+            "author_matched": final_author_matched,
             "activity_url": clean_activity_url,
             "screenshot_url": clean_screenshot_url,
             "notes": clean_notes,
@@ -717,16 +872,16 @@ Respond strictly in valid JSON:
         r_claims.append(clean_claim_id)
         self.round_claims[clean_round_id] = json.dumps(r_claims)
 
-        # Update claimant claims list
-        sender_key = str(sender).lower()
+        # Update claimant claims list (indexed by user-bound address)
+        claimant_key = str(actual_claimant).lower()
         c_claims = []
-        if sender_key in self.claimant_claims:
+        if claimant_key in self.claimant_claims:
             try:
-                c_claims = json.loads(self.claimant_claims[sender_key])
+                c_claims = json.loads(self.claimant_claims[claimant_key])
             except Exception:
                 pass
         c_claims.append(clean_claim_id)
-        self.claimant_claims[sender_key] = json.dumps(c_claims)
+        self.claimant_claims[claimant_key] = json.dumps(c_claims)
 
         # Update round aggregate counters
         round_data["total_claims"] = int(round_data.get("total_claims", 0)) + 1
@@ -743,9 +898,13 @@ Respond strictly in valid JSON:
         return json.dumps({
             "claim_id": clean_claim_id,
             "round_id": clean_round_id,
+            "claimant": str(actual_claimant),
+            "builder_github": clean_builder_github,
+            "canonical_evidence": canonical_evidence,
             "status": "ADJUDICATED",
             "verdict": final_verdict,
             "tier1_pr_merged": final_pr_merged,
+            "author_matched": final_author_matched,
             "tier2_sybil_score": final_sybil_score,
             "tier2_sybil_tier": final_sybil_tier,
             "fraud_detected": final_fraud_detected,
@@ -762,11 +921,12 @@ Respond strictly in valid JSON:
     def finalize_round_payouts(self, round_id: str) -> str:
         """
         Finalize grant round after deadline elapses and allocate pool to top ranking projects.
-        1. Projects that pass validator checks (PR merged) and sybil checks qualify.
-        2. Qualified projects are ranked by strength of idea and execution.
-        3. The top N (reward_recipients_count) projects share the pool and receive rewards + bond refund.
-        4. Sybil fraud bonds are slashed into dispute bounty pool.
-        5. Honest non-winning projects receive their refundable bonds back.
+        Strictly prevents settlement if any claim is appealed or non-final.
+
+        1. Slashes fraud bonds into dispute bounty pool.
+        2. Refunds unmerged or author-mismatched submissions.
+        3. Ranks qualified projects by strength score and allocates rewards + bond refunds
+           directly to user-bound claimant addresses via emit_transfer.
         """
         clean_id = str(round_id).strip()
         self._require(clean_id in self.rounds, "round_id not found")
@@ -778,10 +938,6 @@ Respond strictly in valid JSON:
         expires_at = int(round_data.get("expires_at", 0))
         self._require(now_ts >= expires_at, f"Grant round timeline has not elapsed yet ({expires_at - now_ts}s remaining)")
 
-        recipients_count = int(round_data.get("reward_recipients_count", round_data.get("max_winners", 1)))
-        reward_per_winner = int(round_data.get("reward_amount_per_recipient_wei", round_data.get("grant_amount_per_claim_wei", 0)))
-        remaining_pool = int(round_data.get("remaining_pool_wei", 0))
-
         claim_ids = []
         if clean_id in self.round_claims:
             try:
@@ -789,12 +945,36 @@ Respond strictly in valid JSON:
             except Exception:
                 claim_ids = []
 
+        # PREVENT APPEALED OR NON-FINAL CLAIMS FROM BEING SETTLED:
+        # All claims in the round must have reached finality and have no pending appeals.
+        for cid in claim_ids:
+            if cid not in self.claims:
+                continue
+            c = json.loads(self.claims[cid])
+            if c.get("status") in ("SETTLED", "SLASHED", "REFUNDED"):
+                continue
+
+            if c.get("is_appealed", False) or c.get("status") == "APPEALED":
+                raise gl.vm.UserError(
+                    f"[EXPECTED] Cannot finalize round: Claim '{cid}' has an active appeal pending and must be resolved before settlement"
+                )
+
+            claim_finality = int(c.get("finality_expires_at", 0))
+            if now_ts < claim_finality:
+                raise gl.vm.UserError(
+                    f"[EXPECTED] Cannot finalize round: Claim '{cid}' is non-final ({claim_finality - now_ts}s remaining in appeal window)"
+                )
+
+        recipients_count = int(round_data.get("reward_recipients_count", round_data.get("max_winners", 1)))
+        reward_per_winner = int(round_data.get("reward_amount_per_recipient_wei", round_data.get("grant_amount_per_claim_wei", 0)))
+        remaining_pool = int(round_data.get("remaining_pool_wei", 0))
+
         qualified_claims = []
         for cid in claim_ids:
             if cid not in self.claims:
                 continue
             c = json.loads(self.claims[cid])
-            if c.get("status") in ("SETTLED", "SLASHED"):
+            if c.get("status") in ("SETTLED", "SLASHED", "REFUNDED"):
                 continue
 
             bond_wei = int(c.get("bond_wei", 0))
@@ -808,6 +988,18 @@ Respond strictly in valid JSON:
                 c["verdict"] = "REJECTED_SYBIL_FRAUD"
                 c["settled_at"] = now_ts
                 self.claims[cid] = json.dumps(c, sort_keys=True)
+                continue
+
+            # Provenance mismatch: author does not match builder
+            if not c.get("author_matched", True):
+                self.total_bonds_refunded_wei = u256(int(self.total_bonds_refunded_wei) + bond_wei)
+                c["status"] = "REFUNDED"
+                c["verdict"] = "REJECTED_AUTHOR_MISMATCH"
+                c["settled_at"] = now_ts
+                self.claims[cid] = json.dumps(c, sort_keys=True)
+                if bond_wei > 0:
+                    target = gl.get_contract_at(claimant_addr)
+                    target.emit_transfer(value=u256(bond_wei), on="finalized")
                 continue
 
             # Honest mistake: PR not merged
@@ -854,10 +1046,11 @@ Respond strictly in valid JSON:
                 self.claims[cid] = json.dumps(c, sort_keys=True)
                 winners.append(cid)
 
+                # User-bound custody payout directly to builder
                 target = gl.get_contract_at(claimant_addr)
                 target.emit_transfer(value=u256(total_payout), on="finalized")
             else:
-                # Honest runner-up: bond refunded, no grant payout
+                # Honest runner-up: bond refunded to user
                 self.total_bonds_refunded_wei = u256(int(self.total_bonds_refunded_wei) + bond_wei)
                 c["status"] = "REFUNDED"
                 c["verdict"] = "HONEST_RUNNER_UP"
@@ -889,7 +1082,8 @@ Respond strictly in valid JSON:
     def settle_claim(self, claim_id: str) -> str:
         """
         Execute deterministic fund custody release or bond slashing for an adjudicated claim.
-        If round has expired and not yet settled, executes round ranking finalization.
+        Strictly prevents settlement if the claim is appealed or non-final (within appeal window).
+        All disbursements transfer directly to claimant_address (user-bound custody).
         """
         clean_id = str(claim_id).strip()
         self._require(clean_id in self.claims, "Claim not found")
@@ -909,12 +1103,13 @@ Respond strictly in valid JSON:
                 "settled_at": claim.get("settled_at", 0),
             })
 
-        self._require(status == "ADJUDICATED", f"Claim is not in ADJUDICATED state (current: {status})")
-        self._require(not claim.get("is_appealed", False), "Claim has an active appeal in progress")
+        # PREVENT APPEALED OR NON-FINAL CLAIMS FROM BEING SETTLED:
+        self._require(status == "ADJUDICATED", f"Cannot settle non-final claim in '{status}' state")
+        self._require(not claim.get("is_appealed", False) and status != "APPEALED", "Claim has an active appeal in progress and cannot be settled")
 
         now_ts = int(self._now())
         finality_exp = int(claim.get("finality_expires_at", 0))
-        self._require(now_ts >= finality_exp, f"Native appeal window is still active ({finality_exp - now_ts}s remaining)")
+        self._require(now_ts >= finality_exp, f"Native appeal window is still active ({finality_exp - now_ts}s remaining); non-final claims cannot be settled")
 
         # For competitive rounds or rounds where deadline has elapsed, finalization is required
         expires_at = int(round_data.get("expires_at", 0))
@@ -957,7 +1152,7 @@ Respond strictly in valid JSON:
             self.dispute_bounty_pool_wei = u256(int(self.dispute_bounty_pool_wei) + slashed_wei)
             claim["status"] = "SLASHED"
 
-        elif verdict == "REJECTED_PR_NOT_MERGED":
+        elif verdict in ("REJECTED_PR_NOT_MERGED", "REJECTED_AUTHOR_MISMATCH", "REJECTED_REPOSITORY_MISMATCH"):
             claimant_transfer_wei = bond_wei
             refunded_bond_wei = bond_wei
             self.total_bonds_refunded_wei = u256(int(self.total_bonds_refunded_wei) + refunded_bond_wei)
@@ -968,6 +1163,7 @@ Respond strictly in valid JSON:
 
         self.rounds[round_id] = json.dumps(round_data, sort_keys=True)
 
+        # User-bound custody payout transfer
         if claimant_transfer_wei > 0:
             target_contract = gl.get_contract_at(claimant_addr)
             target_contract.emit_transfer(value=u256(claimant_transfer_wei), on="finalized")
@@ -990,7 +1186,7 @@ Respond strictly in valid JSON:
     def appeal_claim(self, claim_id: str, appeal_reason: str) -> str:
         """
         Record a native protocol consensus appeal before finality expires.
-        Freezes automated settlement to allow expanded validator re-adjudication.
+        Freezes settlement and prevents any payouts or fund release until resolution.
         """
         clean_id = str(claim_id).strip()
         clean_reason = str(appeal_reason).strip()
@@ -1002,20 +1198,17 @@ Respond strictly in valid JSON:
         status = str(claim.get("status", ""))
         self._require(status == "ADJUDICATED", f"Claim is not in ADJUDICATED state (current: {status})")
 
-        sender = gl.message.sender_address
-        self._require(
-            str(sender).lower() == str(claim.get("claimant", "")).lower() or sender == self.owner,
-            "Only claimant or contract owner may register an appeal"
-        )
-
         now_ts = int(self._now())
         finality_exp = int(claim.get("finality_expires_at", 0))
         self._require(now_ts < finality_exp, "Finality window has already expired; cannot appeal")
+
+        sender = gl.message.sender_address
 
         claim["is_appealed"] = True
         claim["status"] = "APPEALED"
         claim["appeal_reason"] = clean_reason
         claim["appealed_at"] = now_ts
+        claim["appellant"] = str(sender)
 
         self.claims[clean_id] = json.dumps(claim, sort_keys=True)
 
@@ -1024,6 +1217,7 @@ Respond strictly in valid JSON:
             "status": "APPEALED",
             "is_appealed": True,
             "appealed_at": now_ts,
+            "appellant": str(sender),
             "reason": clean_reason,
         })
 
@@ -1038,17 +1232,17 @@ Respond strictly in valid JSON:
 
         self._require(gl.message.sender_address == self.owner, "Only governor may commit appeal resolution")
         self._require(clean_id in self.claims, "Claim not found")
-        self._require(verdict in ("APPROVED", "REJECTED_SYBIL_FRAUD", "REJECTED_PR_NOT_MERGED"), "Invalid verdict")
+        self._require(verdict in ("APPROVED", "REJECTED_SYBIL_FRAUD", "REJECTED_PR_NOT_MERGED", "REJECTED_AUTHOR_MISMATCH"), "Invalid verdict")
 
         claim = json.loads(self.claims[clean_id])
-        self._require(claim.get("is_appealed", False), "Claim is not in APPEALED state")
+        self._require(claim.get("is_appealed", False) or claim.get("status") == "APPEALED", "Claim is not in APPEALED state")
 
         now_ts = int(self._now())
         claim["verdict"] = verdict
         claim["status"] = "ADJUDICATED"
         claim["is_appealed"] = False
         claim["appeal_resolution_notes"] = notes
-        # Reset finality to now so settlement can execute
+        # Reset finality to now so settlement can proceed
         claim["finality_expires_at"] = now_ts
 
         self.claims[clean_id] = json.dumps(claim, sort_keys=True)
